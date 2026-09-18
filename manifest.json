@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "tally-mcp-server",
   "display_name": "Tally Prime",
-  "version": "7.6.2",
+  "version": "7.7.0",
   "description": "Expose Tally Prime ERP data to MCP-compatible clients like Claude Desktop.",
   "author": {
     "name": "Dhananjay Gokhale",
@@ -35,7 +35,7 @@
     "TALLY_PORT": {
       "type": "number",
       "title": "Tally Port",
-      "description": "Port number for Tally XML server",
+      "description": "Default port of the Tally XML server used when the server starts. When several Tally Prime instances run on different ports, the port can be changed per conversation with the set-tally-connection tool without touching this setting",
       "required": false,
       "default": 9000
     },
@@ -57,7 +57,15 @@
   "tools": [
     {
       "name": "server-info",
-      "description": "returns the build and connectivity state of this Tally Prime MCP server: its version, whether write tools are exposed, the Tally host and port it talks to, whether Tally answered, the list of companies open in Tally and which one is active. call this first whenever a tool returns no data or behaves unexpectedly, since an unreachable Tally and a Tally with no company loaded both look like empty results everywhere else"
+      "description": "returns the build and connectivity state of this Tally Prime MCP server: its version, whether write tools are exposed, the Tally host and port it talks to along with connectionSource (default from the extension settings, or session when chosen through set-tally-connection) and the default host and port it started with, whether Tally answered, the list of companies open in Tally and which one is active. call this first whenever a tool returns no data or behaves unexpectedly, since an unreachable Tally and a Tally with no company loaded both look like empty results everywhere else"
+    },
+    {
+      "name": "list-tally-instances",
+      "description": "scans a port range on the Tally host (default 9000 to 9999, optional host, fromPort and toPort inputs) for running Tally Prime instances and returns every port which answered along with the companies open there, the active company and its books-from date, plus the connection currently in use and a hint on what to do next. call this at the start of every conversation: when exactly one Tally answers connect to it automatically with set-tally-connection, when several answer ask the user which port to use, and when none answer tell the user that Tally Prime is not running or its XML port is not enabled"
+    },
+    {
+      "name": "set-tally-connection",
+      "description": "switches the Tally host and port used by every subsequent tool call of this server, reads as well as writes, until it is changed again or the server restarts. port is required (1 to 65535) and host is optional. the port is probed first and the change is refused, leaving the previous connection in place, if no Tally Prime answers there. use it after list-tally-instances when several Tally Prime instances run on different ports, or whenever the user asks to switch to another port. available even when Block Write Access is on"
     },
     {
       "name": "metadata-collection",

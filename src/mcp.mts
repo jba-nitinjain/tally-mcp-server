@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import { deleteMasters, deleteVouchers, fetchReport, importMasters, importVouchers, invokeTallyAction, queryCollection, renameObjectArrayProperties } from './tally.mjs';
+import { deleteMasters, deleteVouchers, fetchReport, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, resetTallyConnection, scanTallyInstances, setTallyConnection } from './tally.mjs';
 import { cacheTable, executeSQL } from './database.mjs';
 import { lstCollectionFields, lstOptionCountryState } from './definition.mjs';
 import { utility } from './utility.mjs';
@@ -201,6 +201,8 @@ export async function registerMcpServer(): Promise<McpServer> {
     name: 'Tally Prime MCP Server',
     title: 'Tally Prime',
     version: resolveServerVersion()
+  }, {
+    instructions: 'Several Tally Prime instances may run at once on this machine, each on its own port. At the start of every conversation, before calling any data or write tool, call list-tally-instances. If exactly one Tally answers, call set-tally-connection with that port and tell the user which port and companies you connected to. If more than one answers, show the user the ports with their companies and ask which one to use, then call set-tally-connection with the chosen port. If none answers, tell the user to enable the XML server in Tally (F1 > Settings > Connectivity > Client/Server configuration with TallyPrime acting as Server). The chosen connection stays in effect until it is changed with set-tally-connection or until this server process restarts, so a previous conversation may have left a different port selected. Always re-check at the start of a conversation rather than assuming the port'
   });
 
 
@@ -208,7 +210,7 @@ export async function registerMcpServer(): Promise<McpServer> {
     'server-info',
     {
       title: 'Server Info',
-      description: `returns the build and connectivity state of this Tally Prime MCP server: its version, whether write tools are exposed, the Tally host and port it talks to, whether Tally answered, the list of companies open in Tally and which one is active. call this first whenever a tool returns no data or behaves unexpectedly, since an unreachable Tally and a Tally with no company loaded both look like empty results everywhere else`,
+      description: `returns the build and connectivity state of this Tally Prime MCP server: its version, whether write tools are exposed, the Tally host and port it currently talks to (which may have been changed from the installed default by set-tally-connection in this or an earlier conversation), whether Tally answered, the list of companies open in Tally and which one is active. call this first whenever a tool returns no data or behaves unexpectedly, since an unreachable Tally and a Tally with no company loaded both look like empty results everywhere else`,
       inputSchema: {},
       annotations: {
         readOnlyHint: true,
@@ -216,11 +218,15 @@ export async function registerMcpServer(): Promise<McpServer> {
       }
     },
     async () => {
+      const objConnection = getTallyConnection();
       const objInfo: any = {
         version: resolveServerVersion(),
         writeToolsEnabled: !isWriteBlocked,
-        tallyHost: process.env.TALLY_HOST || 'localhost',
-        tallyPort: parseInt(process.env.TALLY_PORT || '9000')
+        tallyHost: objConnection.host,
+        tallyPort: objConnection.port,
+        connectionSource: objConnection.source,
+        defaultTallyHost: process.env.TALLY_HOST || 'localhost',
+        defaultTallyPort: parseInt(process.env.TALLY_PORT || '9000')
       };
 
       try {
@@ -241,13 +247,133 @@ export async function registerMcpServer(): Promise<McpServer> {
         }
       } catch (err) {
         objInfo.tallyReachable = false;
-        objInfo.diagnosis = `Tally did not answer on ${objInfo.tallyHost}:${objInfo.tallyPort}. Ensure Tally Prime is running and its XML server is enabled from Help (F1) > Settings > Connectivity > Client/Server configuration with TallyPrime acting as Server`;
+        objInfo.diagnosis = `Tally did not answer on ${objInfo.tallyHost}:${objInfo.tallyPort}. Ensure Tally Prime is running and its XML server is enabled from Help (F1) > Settings > Connectivity > Client/Server configuration with TallyPrime acting as Server. If several Tally instances run on this machine, call list-tally-instances to find the right port and set-tally-connection to switch`;
         objInfo.error = formatError(err);
       }
 
       return {
         content: [{ type: 'text', text: JSON.stringify(objInfo) }]
       };
+    }
+  );
+
+  mcpServer.registerTool(
+    'list-tally-instances',
+    {
+      title: 'List Tally Instances',
+      description: `scans a port range on the given host for running Tally Prime instances and returns each answering port with the companies open in it and which of them is active. several Tally Prime instances may run at once on different ports, so this must be called at the start of every conversation to pick the right Tally before any data or write tool is used, followed by set-tally-connection with the chosen port. scanning the default range 9000 to 9999 takes a few seconds; narrow fromPort and toPort when the ports in use are known`,
+      inputSchema: {
+        host: z.string().optional().describe('optional host name or IP address to scan, defaults to the host of the current connection'),
+        fromPort: z.number().int().min(1).max(65535).optional().describe('optional first port of the range to scan, default is 9000'),
+        toPort: z.number().int().min(1).max(65535).optional().describe('optional last port of the range to scan, default is 9999')
+      },
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => {
+      try {
+        const targetHost = args.host || getTallyConnection().host;
+        const fromPort = args.fromPort ?? 9000;
+        const toPort = args.toPort ?? 9999;
+
+        if (fromPort > toPort) {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: `fromPort ${fromPort} is greater than toPort ${toPort}` }]
+          };
+        }
+
+        const lstInstance = await scanTallyInstances(targetHost, fromPort, toPort);
+
+        let hint: string;
+        if (lstInstance.length === 0) {
+          hint = `No Tally Prime instance answered on ${targetHost} between ports ${fromPort} and ${toPort}. Tell the user to ensure Tally Prime is running and its XML server is enabled from Help (F1) > Settings > Connectivity > Client/Server configuration with TallyPrime acting as Server`;
+        } else if (lstInstance.length === 1) {
+          const objInstance = lstInstance[0];
+          hint = `Exactly one Tally Prime instance answered on port ${objInstance.port} with ${objInstance.companies.length} company(s) open${objInstance.activeCompany ? `, active company ${objInstance.activeCompany}` : ''}. Call set-tally-connection with port ${objInstance.port} and tell the user which port and companies you connected to`;
+        } else {
+          hint = `${lstInstance.length} Tally Prime instances answered on ports ${lstInstance.map((item) => item.port).join(', ')}. Show the user each port with its companies and ask the user which port to use, then call set-tally-connection with the chosen port`;
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              host: targetHost,
+              fromPort,
+              toPort,
+              scannedPorts: toPort - fromPort + 1,
+              instances: lstInstance,
+              currentConnection: getTallyConnection(),
+              hint
+            })
+          }]
+        };
+      } catch (err) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: formatError(err) }]
+        };
+      }
+    }
+  );
+
+  mcpServer.registerTool(
+    'set-tally-connection',
+    {
+      title: 'Set Tally Connection',
+      description: `sets the Tally Prime host and port used by every subsequent tool call in this server process, reads and writes alike, until it is changed again by another call to this tool or the server restarts. the port is probed before it is accepted, so an unreachable port leaves the previous connection in place and returns an error. call list-tally-instances first to find which ports have a Tally answering and which companies each one has open`,
+      inputSchema: {
+        port: z.number().int().min(1).max(65535).describe('port on which the target Tally Prime instance serves XML requests, as reported by list-tally-instances'),
+        host: z.string().optional().describe('optional host name or IP address of the target Tally Prime instance, defaults to the host of the current connection')
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => {
+      const objPrevious = getTallyConnection();
+
+      try {
+        const objConnection = setTallyConnection(args.port, args.host);
+        const objInstance = await probeTallyInstance(objConnection.host, objConnection.port);
+
+        if (!objInstance) {
+          // Revert so that a mistyped port does not leave every later tool call pointing at nothing
+          if (objPrevious.source === 'default')
+            resetTallyConnection();
+          else
+            setTallyConnection(objPrevious.port, objPrevious.host);
+
+          return {
+            isError: true,
+            content: [{ type: 'text', text: `No Tally Prime instance answered on ${objConnection.host}:${objConnection.port}. The connection stays on ${objPrevious.host}:${objPrevious.port}. Call list-tally-instances to find which ports have a Tally answering` }]
+          };
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              connection: objConnection,
+              companies: objInstance.companies,
+              activeCompany: objInstance.activeCompany,
+              booksFrom: objInstance.booksFrom,
+              message: `Connected to Tally on ${objConnection.host}:${objConnection.port} with ${objInstance.companies.length} companies open, active company ${objInstance.activeCompany ?? 'none'}`
+            })
+          }]
+        };
+      } catch (err) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: formatError(err) }]
+        };
+      }
     }
   );
 

@@ -1,11 +1,44 @@
 import http from 'node:http';
+import net from 'node:net';
 import nunjucks from 'nunjucks';
 import { XMLParser } from 'fast-xml-parser';
 import { utility } from './utility.mjs';
 import { lstCollectionFields, lstPushXml, lstReportConfig, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers } from './definition.mjs';
-const tally_port = parseInt(process.env.TALLY_PORT || '9000'); // default to 9000 XML port of Tally
-const tally_host = process.env.TALLY_HOST || 'localhost'; // default to localhost
+const default_tally_port = parseInt(process.env.TALLY_PORT || '9000') || 9000; // default to 9000 XML port of Tally
+const default_tally_host = process.env.TALLY_HOST || 'localhost'; // default to localhost
 const lstPullReport = lstReportConfig;
+// live connection used by every request. Earlier this was fixed at process start,
+// so a Tally running on another port could not be reached without a restart
+let tallyConnection = {
+    host: default_tally_host,
+    port: default_tally_port,
+    source: 'default'
+};
+function isValidPort(port) {
+    return typeof port == 'number' && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+export function getTallyConnection() {
+    return { ...tallyConnection };
+}
+/**
+ * Points the session at a different Tally instance. Host defaults to the current host
+ * @param port XML server port of Tally (1 to 65535)
+ * @param host optional host name or IP address
+ */
+export function setTallyConnection(port, host) {
+    if (!isValidPort(port))
+        throw new Error(`Invalid Tally port [${port}]. Port must be a whole number between 1 and 65535`);
+    let targetHost = (typeof host == 'string' && host.trim()) ? host.trim() : tallyConnection.host;
+    tallyConnection = { host: targetHost, port, source: 'session' };
+    return getTallyConnection();
+}
+/**
+ * Restores the connection to the TALLY_HOST / TALLY_PORT defaults
+ */
+export function resetTallyConnection() {
+    tallyConnection = { host: default_tally_host, port: default_tally_port, source: 'default' };
+    return getTallyConnection();
+}
 const nEnv = new nunjucks.Environment();
 nEnv.addFilter('formatDate', (dt, format) => {
     return utility.Date.format(dt, format);
@@ -81,7 +114,16 @@ export async function fetchReport(targetReport, inputParams) {
         return retval;
     }
 }
-export async function queryCollection(targetCollection, lstFields, lstFilters, targetCompany, fromDate, toDate) {
+export async function queryCollection(targetCollection, lstFields, lstFilters, targetCompany, fromDate, toDate, conn, timeoutMs) {
+    let result = await runCollectionQuery(targetCollection, lstFields, lstFilters, targetCompany, fromDate, toDate, conn, timeoutMs);
+    return result.rows;
+}
+;
+/**
+ * Runs a collection query and returns the parsed rows along with the raw response,
+ * so callers like the port probe can check whether the reply actually came from Tally
+ */
+async function runCollectionQuery(targetCollection, lstFields, lstFilters, targetCompany, fromDate, toDate, conn, timeoutMs) {
     let retval = [];
     try {
         let objTemplateArgs = new Map();
@@ -106,7 +148,7 @@ export async function queryCollection(targetCollection, lstFields, lstFilters, t
             }
             objTemplateArgs.set('filters', objFilters); //add filters to template arguments
         }
-        let respContent = await sendTallyXml(xmlQueryCollection, objTemplateArgs); //send XML to Tally and get response
+        let respContent = await sendTallyXml(xmlQueryCollection, objTemplateArgs, conn, timeoutMs); //send XML to Tally and get response
         let xmlParser = new XMLParser({
             parseTagValue: false,
             isArray(tagName) {
@@ -114,7 +156,7 @@ export async function queryCollection(targetCollection, lstFields, lstFilters, t
             },
         });
         let resultObj = xmlParser.parse(respContent);
-        if (resultObj['DATA'] && Array.isArray(resultObj['DATA']['ROW'])) {
+        if (resultObj && resultObj['DATA'] && Array.isArray(resultObj['DATA']['ROW'])) {
             for (const rowObj of resultObj['DATA']['ROW']) {
                 let o = new Object();
                 for (const field of lstQueryFields) {
@@ -133,13 +175,12 @@ export async function queryCollection(targetCollection, lstFields, lstFilters, t
                 retval.push(o);
             }
         }
-        return retval;
+        return { rows: retval, response: respContent };
     }
     catch (err) {
         throw err;
     }
 }
-;
 /**
  * Invokes a Tally action (a report used only for its side effect, like switching company or period).
  * The response was earlier discarded, which turned every failure into a silent success for the caller,
@@ -259,7 +300,7 @@ export async function deleteVouchers(lstVoucher, targetCompany) {
         throw err;
     }
 }
-async function sendTallyXml(xml, lstVariables) {
+async function sendTallyXml(xml, lstVariables, conn, timeoutMs) {
     try {
         // remove targetCompany from lstVariables if found with default value
         if (lstVariables.has('targetCompany') && lstVariables.get('targetCompany') == '##SVCurrentCompany') {
@@ -271,19 +312,26 @@ async function sendTallyXml(xml, lstVariables) {
             Object.defineProperty(o, k, { enumerable: true, value: v });
         });
         let xmlRequest = nEnv.renderString(xml, o);
-        let xmlResponse = await postTallyXML(xmlRequest);
+        let xmlResponse = await postTallyXML(xmlRequest, conn, timeoutMs);
         return xmlResponse;
     }
     catch (err) {
         throw err;
     }
 }
-async function postTallyXML(xml) {
+/**
+ * Posts XML to Tally. The session connection is read on every call so a runtime change
+ * takes effect immediately; a caller may target a specific host:port instead (used by port probes)
+ * @param conn optional host:port override, defaults to the session connection
+ * @param timeoutMs optional socket inactivity timeout after which the request is aborted
+ */
+async function postTallyXML(xml, conn, timeoutMs) {
     return new Promise((resolve, reject) => {
         try {
+            let target = conn || tallyConnection;
             let req = http.request({
-                hostname: tally_host,
-                port: tally_port,
+                hostname: target.host,
+                port: target.port,
                 path: '',
                 method: 'POST',
                 headers: {
@@ -305,10 +353,12 @@ async function postTallyXML(xml) {
                     reject(httpErr);
                 });
             });
+            if (typeof timeoutMs == 'number' && timeoutMs > 0)
+                req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
             req.on('error', (reqError) => {
-                let errorType = reqError['message'] || reqError['code'];
+                let errorType = reqError['code'] || reqError['message'];
                 if (errorType === 'ECONNREFUSED')
-                    reject('Unable to connect to Tally. Ensure Tally is running and XML server is enabled on port ' + tally_port + ' by going to Help (F1) > Settings > Connectivity in Tally and setting Client / Server configuration, set Tally Prime is action as Server');
+                    reject('Unable to connect to Tally. Ensure Tally is running and XML server is enabled on port ' + target.port + ' by going to Help (F1) > Settings > Connectivity in Tally and setting Client / Server configuration, set Tally Prime is action as Server');
                 else
                     reject(reqError);
             });
@@ -319,6 +369,114 @@ async function postTallyXML(xml) {
             reject(err);
         }
     });
+}
+/**
+ * Checks whether a raw response body looks like it was produced by Tally's XML server.
+ * Other HTTP services on the port (or non-HTTP services) never produce these envelopes
+ */
+function isTallyResponse(respContent) {
+    if (typeof respContent != 'string')
+        return false;
+    let body = respContent.replace(/^﻿/, '').trim();
+    if (!body.startsWith('<'))
+        return false;
+    return /<(DATA|ENVELOPE|RESPONSE|EXCEPTION|LINEERROR)\b/i.test(body);
+}
+/**
+ * Probes a single host:port to check if a Tally XML server is listening there.
+ * Returns null when the port is closed, the service does not speak Tally XML, or the request times out.
+ * Never throws, so it is safe to run in bulk during a port scan
+ * @param timeoutMs socket inactivity timeout (default 3000)
+ */
+export async function probeTallyInstance(host, port, timeoutMs = 3000) {
+    try {
+        if (typeof host != 'string' || !host.trim() || !isValidPort(port))
+            return null;
+        let target = { host: host.trim(), port };
+        let result = await runCollectionQuery('Company', ['Name', 'BooksFrom', 'IsActiveCompany'], new Map(), undefined, undefined, undefined, target, timeoutMs);
+        if (!isTallyResponse(result.response))
+            return null; //something answered, but it was not Tally
+        let companies = result.rows
+            .map(r => r['Name'])
+            .filter(n => typeof n == 'string' && n.trim() != '');
+        let objActive = result.rows.find(r => r['IsActiveCompany'] === true && typeof r['Name'] == 'string' && r['Name'].trim() != '');
+        let booksFrom = null;
+        if (objActive && objActive['BooksFrom'] instanceof Date && !isNaN(objActive['BooksFrom'].getTime()))
+            booksFrom = utility.Date.format(objActive['BooksFrom'], 'yyyy-MM-dd');
+        return {
+            host: target.host,
+            port: target.port,
+            companies,
+            activeCompany: objActive ? objActive['Name'] : null,
+            booksFrom
+        };
+    }
+    catch (err) {
+        return null;
+    }
+}
+/**
+ * Cheap TCP connect check used to skip closed ports before the heavier XML probe
+ */
+function isTcpPortOpen(host, port, timeoutMs) {
+    return new Promise((resolve) => {
+        let settled = false;
+        let socket = net.connect({ host, port });
+        const finish = (isOpen) => {
+            if (settled)
+                return;
+            settled = true;
+            socket.destroy();
+            resolve(isOpen);
+        };
+        socket.setTimeout(timeoutMs, () => finish(false));
+        socket.once('connect', () => finish(true));
+        socket.once('error', () => finish(false));
+    });
+}
+/**
+ * Scans a port range on a host and returns every port where a Tally XML server answered, sorted by port.
+ * Step 1 is a fast TCP probe (300ms, 100 at a time) so a range of closed ports finishes in seconds;
+ * step 2 sends the Company query only to ports that accepted the connection (10 at a time)
+ * @param host defaults to the current connection host
+ * @param fromPort defaults to 9000
+ * @param toPort defaults to 9999
+ */
+export async function scanTallyInstances(host, fromPort = 9000, toPort = 9999) {
+    let targetHost = (typeof host == 'string' && host.trim()) ? host.trim() : tallyConnection.host;
+    if (!isValidPort(fromPort) || !isValidPort(toPort))
+        throw new Error(`Invalid port range [${fromPort}-${toPort}]. Ports must be whole numbers between 1 and 65535`);
+    if (fromPort > toPort)
+        throw new Error(`Invalid port range [${fromPort}-${toPort}]. Starting port must not be greater than ending port`);
+    if (toPort - fromPort + 1 > 2000)
+        throw new Error(`Port range [${fromPort}-${toPort}] is too wide. At most 2000 ports can be scanned at a time`);
+    const tcpTimeoutMs = 300;
+    const tcpConcurrency = 100;
+    const probeConcurrency = 10;
+    //step 1: find ports that accept a TCP connection
+    let lstPorts = [];
+    for (let p = fromPort; p <= toPort; p++)
+        lstPorts.push(p);
+    let lstOpenPorts = [];
+    for (let i = 0; i < lstPorts.length; i += tcpConcurrency) {
+        let batch = lstPorts.slice(i, i + tcpConcurrency);
+        let results = await Promise.all(batch.map(p => isTcpPortOpen(targetHost, p, tcpTimeoutMs)));
+        results.forEach((isOpen, idx) => {
+            if (isOpen)
+                lstOpenPorts.push(batch[idx]);
+        });
+    }
+    //step 2: ask each open port whether it is Tally; non-Tally services are dropped silently
+    let retval = [];
+    for (let i = 0; i < lstOpenPorts.length; i += probeConcurrency) {
+        let batch = lstOpenPorts.slice(i, i + probeConcurrency);
+        let results = await Promise.all(batch.map(p => probeTallyInstance(targetHost, p)));
+        for (const info of results) {
+            if (info)
+                retval.push(info);
+        }
+    }
+    return retval.sort((a, b) => a.port - b.port);
 }
 function extractReport(reportConfig, reportInputParams) {
     return new Promise(async (resolve, reject) => {

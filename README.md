@@ -14,16 +14,18 @@ TallyPrime acts as = Server
 Port = 9000
 ```
 
+Running several Tally Prime instances at once (say different versions or different sets of companies) on different ports is supported, they are discovered automatically at the start of each conversation, see [Multiple Tally instances](#multiple-tally-instances) below.
+
 *Note: Kindly avoid using Educational version of Tally Prime, which has limitations of date range. It will result in invalid / partial data being fed to LLM, leading to highly degraded &amp; incorrect responses.*
 
 ## Download
 Avoid cloning repository directly. Utility is available for download (with required dependencies) on below link <br>
-[https://excelkida.com/resource/tally-mcp-server-v7.6.2.zip](https://excelkida.com/resource/tally-mcp-server-v7.6.2.zip)
+[https://excelkida.com/resource/tally-mcp-server-v7.7.0.zip](https://excelkida.com/resource/tally-mcp-server-v7.7.0.zip)
 
 One-click installer **extension** for **Claude Desktop**<br>
-[https://excelkida.com/resource/tally-mcp-server-v7.6.2.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.6.2.mcpb)
+[https://excelkida.com/resource/tally-mcp-server-v7.7.0.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.7.0.mcpb)
 
-Last updated: version **7.6.2** [21-Aug-2026]
+Last updated: version **7.7.0** [18-Sep-2026]
 
 Refer docs/CHANGELOG.md for details
 
@@ -108,9 +110,23 @@ This mode of setup is to be used, when using browser-based MCP client like ChatG
 * [Linux-based Server](docs/server-setup-linux.md)
 * Windows Server (exploration in-progress)
 
+## Multiple Tally instances
+
+The port set at install time (`TALLY_PORT`, default **9000**) is only the starting point. If more than one Tally Prime is running on the PC, for example two versions of Tally or two separate sets of companies, each on its own XML port, Claude finds them on its own and you simply tell it which one to use.
+
+From your side the flow looks like this:
+1. Start a new chat. Claude scans the ports (9000 to 9999 by default) for running Tally Prime instances.
+1. If exactly one Tally answers, Claude connects to it straight away and carries on.
+1. If several answer, Claude lists them along with the companies open in each and asks which port to use. Reply with the port (for example *use 9001*).
+1. Everything after that, reports as well as any creation or alteration of masters and vouchers, goes to that Tally until you change it.
+
+You can switch at any moment by saying something like *switch to port 9001*. Claude checks that a Tally really answers on that port before switching, so a typo cannot silently send your data to nowhere.
+
+One thing to be aware of: Claude Desktop runs a single copy of this server for the whole application, not one per chat. A port chosen in one chat therefore stays selected for later chats until it is changed again or Claude Desktop is restarted. Claude re-checks the connection at the start of every conversation, so it will tell you which Tally it is talking to before doing anything else. The **server-info** tool reports it as well.
+
 ## Available Tools
 
-This server currently exposes 39 MCP tools. Tools that write back into Tally Prime (create / update / delete of masters and vouchers) can be hidden altogether via the `BLOCK_WRITE` setting described under Environment Variables.
+This server currently exposes 41 MCP tools. Tools that write back into Tally Prime (create / update / delete of masters and vouchers) can be hidden altogether via the `BLOCK_WRITE` setting described under Environment Variables.
 
 ### server-info
 Reports the build and connectivity state of this server. Call it first whenever a tool returns no data or behaves unexpectedly — an unreachable Tally and a Tally with no company loaded both look like an empty result everywhere else.
@@ -123,10 +139,40 @@ JSON containing:
 1. `version` — build of the MCP server that is actually running
 1. `writeToolsEnabled` — false when `BLOCK_WRITE` is set
 1. `tallyHost` / `tallyPort` — where this server is trying to reach Tally
+1. `connectionSource` — `default` when the host and port come from the extension settings / environment, `session` when they were chosen through `set-tally-connection`
+1. `defaultTallyHost` / `defaultTallyPort` — the connection the server started with, which it falls back to after a restart
 1. `tallyReachable` — whether Tally answered at all
 1. `companies` — companies open in Tally
 1. `activeCompany` and `booksFrom` — the current company context
 1. `diagnosis` — plain-language reading of the above, and what to do about it
+
+### list-tally-instances
+Scans a range of ports for running Tally Prime instances, so that the right one can be picked when several are running at once. Claude calls it at the start of every conversation: it connects automatically when exactly one Tally answers, and asks which port to use when several answer.
+
+**Input**
+|Argument|Description|
+|--|--|
+|host (optional)|Host name or IP to scan (defaults to the current Tally host)|
+|fromPort (optional)|First port of the range (default **9000**)|
+|toPort (optional)|Last port of the range (default **9999**)|
+
+**Output**
+JSON containing:
+1. `instances` — one entry per port on which a Tally Prime answered, each with `port`, `companies` open there, `activeCompany` and `booksFrom`
+1. `current` — the host and port every tool call currently goes to
+1. `hint` — what to do next: connect, ask the user to choose, or start Tally / enable its XML port
+
+### set-tally-connection
+Switches the Tally host and port used by every subsequent tool call (reads as well as writes) in this server process, until it is changed again or the server restarts. The port is probed first; if no Tally answers there the change is refused and the previous connection stays in place. Available even when `BLOCK_WRITE` is set.
+
+**Input**
+|Argument|Description|
+|--|--|
+|port|Port of the Tally XML server to switch to (1 to 65535)|
+|host (optional)|Host name or IP of the Tally XML server (defaults to the current Tally host)|
+
+**Output**
+JSON containing the host and port now in use, `connectionSource` set to `session`, and the companies open on that Tally with the active one.
 
 ### metadata-collection
 Returns metadata for supported collections.
@@ -833,7 +879,7 @@ End-users are free to hard-code few settings which needs to be applied
 
 |Variable|Description|
 |--|--|
-|TALLY_PORT|Port Number of XML Server of Tally (*optional*, default is **9000**)|
+|TALLY_PORT|Port Number of XML Server of Tally used as the default connection when the server starts (*optional*, default is **9000**). When several Tally Prime instances run on different ports, the port can be switched per conversation through the **set-tally-connection** tool without changing this setting, see [Multiple Tally instances](#multiple-tally-instances)|
 |TALLY_HOST|Host name or IP where XML Server is running (*optional*, default is **localhost**)|
 |BLOCK_WRITE|Controls if MCP completely blocks access of write functionality. Setting this flag to **1** (or **true** / **yes**) will completely hide write functionality tools (create / update / delete of masters and vouchers) from the tool list. [ **0 = Allow , 1 = Block** ] (optional, default is **0** i.e. allowed). For Claude Desktop this is exposed as the **Block Write Access** switch of the extension settings|
 |PORT|Tally MCP Server port number. Applicable only if Tally Prime MCP Server is deployed as Remote MCP server (*optional*, default is **3000**). Not applicable for Claude Desktop|

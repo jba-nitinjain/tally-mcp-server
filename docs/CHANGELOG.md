@@ -1,5 +1,14 @@
 # Release History
 
+### Version: v7.7.0 [18-Sep-2026]
+
+Added:
+* **Tally port is no longer fixed at install time.** Several Tally Prime instances can run at once on different ports (say two versions of Tally, or two separate sets of companies) and the MCP client can pick which one to talk to per conversation. The `TALLY_PORT` / `TALLY_HOST` settings remain as the default connection at startup
+* Tool **list-tally-instances** scanning a port range (default 9000 to 9999, with optional host, fromPort and toPort) for running Tally Prime instances. It returns every port which answered along with the companies open there, the active company and its books-from date, plus the connection currently in use and a hint on what to do next. The server instructs Claude to call it at the start of every conversation, connect automatically when exactly one Tally answers, and ask the user which port to use when several answer
+* Tool **set-tally-connection** switching the Tally host and port used by every subsequent tool call, reads as well as writes, in this server process until changed again or the server restarts. The port is probed first and the change is refused, leaving the previous connection in place, if no Tally answers there. Available even when Block Write Access is on, and can be triggered any time by asking Claude to *switch to port 9001*
+* Tool **server-info** now also reports `connectionSource` (default from the extension settings, or session when chosen through set-tally-connection) together with `defaultTallyHost` / `defaultTallyPort`, so it is always clear which Tally is being addressed and where the server will fall back to after a restart
+* Note that Claude Desktop runs one copy of this server for the whole application, so a port chosen in one chat remains selected for later chats until it is changed again or Claude Desktop is restarted. Claude re-checks the connection at the start of each conversation and states which Tally it is talking to
+
 ### Version: v7.6.2 [21-Aug-2026]
 
 Fixed:
