@@ -5,10 +5,91 @@ import { XMLParser } from 'fast-xml-parser';
 import * as m from './models.mjs';
 import { utility } from './utility.mjs';
 import { lstCollectionFields, lstPushXml, lstReportConfig, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers } from './definition.mjs';
+import { logDebug, logInfo, logWarn } from './log.mjs';
 
 const default_tally_port = parseInt(process.env.TALLY_PORT || '9000') || 9000; // default to 9000 XML port of Tally
 const default_tally_host = process.env.TALLY_HOST || 'localhost'; // default to localhost
 const lstPullReport: m.ModelPullReportInfo[] = lstReportConfig;
+
+// ---------------------------------------------------------------------------
+// Transport settings
+//
+// The Claude relay which forwards tool calls to this machine gives up after 60s and reports
+// "Device did not respond". Earlier a Tally call carried no timeout at all, so a request which
+// Tally never answered held the relay open until that 60s expired. Every Tally call now has an
+// overall budget kept well under 60s, so this server always answers first with a clear message
+// ---------------------------------------------------------------------------
+
+function envInt(name: string, fallback: number): number {
+    let value = parseInt(process.env[name] || '');
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** overall budget for one Tally call, including internal retries */
+const tallyTimeoutMs = envInt('TALLY_TIMEOUT_MS', 45000);
+/** time allowed to open the TCP connection (localhost normally connects within a few ms) */
+const tallyConnectTimeoutMs = envInt('TALLY_CONNECT_TIMEOUT_MS', 5000);
+/** calls slower than this are logged at info level even without TALLY_DEBUG */
+const tallySlowCallMs = envInt('TALLY_SLOW_MS', 5000);
+/** additional attempts after a connection-level failure of an idempotent read */
+const tallyRetryMax = 2;
+const tallyRetryBackoffMs = [500, 1500];
+
+// Reads share a keep-alive pool so a call after an idle gap does not pay a fresh TCP handshake.
+// maxSockets applies per host:port, so it also bounds how many requests are in flight against one
+// Tally instance, which processes XML requests one at a time anyway; the rest wait in this process
+const tallyReadAgent = new http.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 15000,
+    maxSockets: envInt('TALLY_MAX_SOCKETS', 1),
+    maxFreeSockets: 1
+});
+
+// Writes always open a fresh connection. A keep-alive socket which Tally closed while idle fails
+// with ECONNRESET on reuse; for a read that is retried, but a voucher post must never be re-sent
+const tallyWriteAgent = new http.Agent({ keepAlive: false, maxSockets: 1 });
+
+export type TallyTransportPhase = 'queue' | 'connect' | 'response';
+
+/**
+ * A failure of the HTTP transport to Tally as opposed to an answer from Tally. Carries the phase
+ * which failed, so the log shows whether the time went into connecting or into waiting for the
+ * report, and states in plain words that an identical retry is expected to succeed
+ */
+export class TallyTransportError extends Error {
+    readonly phase: TallyTransportPhase;
+    readonly code: string;
+    readonly attempts: number;
+    readonly retryable = true;
+
+    constructor(phase: TallyTransportPhase, code: string, attempts: number, detail: string) {
+        super(`Tally did not answer within the ${Math.round(tallyTimeoutMs / 1000)}s allowed (${phase} phase, ${code}, ${attempts} attempt${attempts == 1 ? '' : 's'}). ${detail} This is a transient connection condition and not a problem with the data requested: an identical retry is expected to succeed. If it keeps happening, check whether Tally Prime is showing a dialog box or is busy with another task`);
+        this.name = 'TallyTransportError';
+        this.phase = phase;
+        this.code = code;
+        this.attempts = attempts;
+    }
+}
+
+interface TallySendOptions {
+    /** true for reads, which may be safely re-sent after a connection-level failure */
+    idempotent?: boolean;
+    /** short label for the log line, e.g. report:ledger-account */
+    label?: string;
+}
+
+interface TallyAttemptTiming {
+    queueMs: number;
+    connectMs: number;
+    ttfbMs: number;
+    totalMs: number;
+    bytes: number;
+    reused: boolean;
+    connected: boolean;
+    headersReceived: boolean;
+}
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 export interface TallyConnection {
     host: string;
@@ -73,6 +154,29 @@ nEnv.addFilter('formatDate', (dt: Date, format: string) => {
     return utility.Date.format(dt, format);
 });
 
+// Templates are compiled once and reused. renderString re-parsed and re-compiled the template
+// on every call, which put the compile cost of the larger report templates on every request
+const templateCache = new Map<string, nunjucks.Template>();
+
+function getTemplate(xml: string): nunjucks.Template {
+    let template = templateCache.get(xml);
+    if (!template) {
+        template = nunjucks.compile(xml, nEnv);
+        templateCache.set(xml, template);
+    }
+    return template;
+}
+
+/**
+ * Compiles every known template ahead of the first request
+ */
+function precompileTemplates(): number {
+    let lstXml: string[] = [xmlQueryCollection, xmlInvokeAction, xmlDeleteMasters, xmlDeleteVouchers, ...lstReportXml.values(), ...lstPushXml.values()];
+    for (const xml of lstXml)
+        getTemplate(xml);
+    return lstXml.length;
+}
+
 export function renameObjectArrayProperties(source: any[], keyMap: Map<string, string>): any[] {
     if (!Array.isArray(source) || source.length == 0)
         return [];
@@ -93,6 +197,28 @@ export function renameObjectArrayProperties(source: any[], keyMap: Map<string, s
     });
 }
 
+/**
+ * Coerces a boolean-like value answered by Tally into true / false, or null when it is empty or unrecognised.
+ * Tally spells a logical field as "Yes" / "No" when the raw attribute is exported, and as "1" / "0" when the TDL
+ * wraps it in "if $X then 1 else 0" (which is what query-collection.njk does). The old check compared against
+ * "Yes" only, so every collection boolean (bs_pl, dr_cr, affects_gross_profit, ...) came back false (feedback #33).
+ * An empty or unknown value is returned as null rather than silently treated as false, so the caller can see the gap
+ */
+export function parseTallyBoolean(value: unknown): boolean | null {
+    if (typeof value === 'boolean')
+        return value;
+    if (typeof value === 'number')
+        return value === 1 ? true : value === 0 ? false : null;
+    if (value === undefined || value === null)
+        return null;
+    const text = String(value).trim().toLowerCase();
+    if (text === 'yes' || text === 'true' || text === '1')
+        return true;
+    if (text === 'no' || text === 'false' || text === '0')
+        return false;
+    return null;
+}
+
 export async function fetchReport(targetReport: string, inputParams: Map<string, any>): Promise<m.ModelPullResponse> {
     let retval: m.ModelPullResponse = {
         data: undefined
@@ -108,7 +234,7 @@ export async function fetchReport(targetReport: string, inputParams: Map<string,
             //set target company
             let targetCompany = '##SVCurrentCompany'; //default value
             if (inputParams.has('targetCompany') && typeof inputParams.get('targetCompany') == 'string')
-                targetCompany = inputParams.get('targetCompany'); //extract from request object
+                targetCompany = utility.String.normaliseName(inputParams.get('targetCompany')); //extract from request object, accepting raw or escaped form
 
             lstInputs.set('targetCompany', targetCompany); //add targetCompany as one of the params
 
@@ -139,7 +265,7 @@ export async function fetchReport(targetReport: string, inputParams: Map<string,
                 else if (typeof _value == 'string' && iType == 'date' && /^\d\d\d\d-\d\d-\d\d/.test(_value)) //ISO DateTime YYYY-MM-DDTHH:MM:SS
                     lstInputs.set(iName, utility.Date.parse(_value.substring(0, 10), 'yyyy-MM-dd'));
                 else if (typeof _value == 'string' && iType == 'string')
-                    lstInputs.set(iName, _value);
+                    lstInputs.set(iName, utility.String.normaliseName(_value)); //names (ledgerName, itemName) are accepted raw or escaped
                 else {
                     retval.error = `Parameter ${iName} not found or contains invalid value [${_value}]`;
                     return retval;
@@ -151,7 +277,9 @@ export async function fetchReport(targetReport: string, inputParams: Map<string,
             retval.error = 'Invalid report';
 
     } catch (err) {
-        retval.error = 'Server exception';
+        // earlier every exception collapsed to 'Server exception', which hid a transport timeout
+        // (and its retry advice) from the caller
+        retval.error = err instanceof Error ? err.message : (typeof err == 'string' ? err : 'Server exception');
     } finally {
         return retval;
     }
@@ -174,7 +302,7 @@ async function runCollectionQuery(targetCollection: string, lstFields: string[],
 
         //assign static variables
         if (targetCompany)
-            objTemplateArgs.set('targetCompany', targetCompany);
+            objTemplateArgs.set('targetCompany', utility.String.normaliseName(targetCompany)); //accept the company name raw or escaped; the template escapes it again for XML
         if (fromDate)
             objTemplateArgs.set('fromDate', fromDate);
         if (toDate)
@@ -197,10 +325,11 @@ async function runCollectionQuery(targetCollection: string, lstFields: string[],
             objTemplateArgs.set('filters', objFilters); //add filters to template arguments
         }
 
-        let respContent = await sendTallyXml(xmlQueryCollection, objTemplateArgs, conn, timeoutMs); //send XML to Tally and get response
+        let respContent = await sendTallyXml(xmlQueryCollection, objTemplateArgs, conn, timeoutMs, { idempotent: true, label: `collection:${targetCollection}` }); //send XML to Tally and get response
 
         let xmlParser = new XMLParser({
             parseTagValue: false,
+            htmlEntities: true, //decode numeric character references (&#13; &#10; &#x41;) at parse time, not only the five named ones
             isArray(tagName) {
                 return (tagName == 'ROW' || tagName.endsWith('.LIST'))
             },
@@ -213,13 +342,13 @@ async function runCollectionQuery(targetCollection: string, lstFields: string[],
                     let _value = rowObj[field.name.toUpperCase()].toString();
                     let value: number | string | boolean | Date | null | undefined = undefined;
                     if (field.datatype == 'boolean')
-                        value = _value == 'Yes';
+                        value = parseTallyBoolean(_value); //accepts Yes/No, true/false, 1/0; empty stays null
                     else if (field.datatype == 'number' || field.datatype == 'amount' || field.datatype == 'quantity' || field.datatype == 'rate')
                         value = parseFloat(_value);
                     else if (field.datatype == 'date')
                         value = utility.Date.parse(_value, 'yyyy-MM-dd');
                     else
-                        value = utility.String.unescapeHTML(_value);
+                        value = utility.String.normaliseName(_value); //Tally escapes text twice in places; decode that second layer, then strip CR/LF/TAB so names round-trip between tools
 
                     Object.defineProperty(o, field.name, { enumerable: true, value });
                 }
@@ -276,7 +405,7 @@ function parseImportResponse(respContent: string): m.CreateUpdateDeleteStatus {
         throw new Error(errorMessage || 'Unknown error received from Tally');
     }
 
-    const xmlParser = new XMLParser({ parseTagValue: false });
+    const xmlParser = new XMLParser({ parseTagValue: false, htmlEntities: true });
     let resultObj = xmlParser.parse(respContent);
     let objResponse = resultObj['RESPONSE'];
 
@@ -369,7 +498,13 @@ export async function deleteVouchers(lstVoucher: any[], targetCompany?: string):
     }
 }
 
-async function sendTallyXml(xml: string, lstVariables: Map<string, any>, conn?: TallyTarget, timeoutMs?: number): Promise<string> {
+/**
+ * Renders a template and posts it to Tally, with timing of every phase written to the log.
+ * @param conn optional host:port override, defaults to the session connection
+ * @param timeoutMs optional overall budget for this call; when given, the call is a probe and is never retried
+ * @param options idempotent reads are retried after a connection-level failure, writes are not
+ */
+async function sendTallyXml(xml: string, lstVariables: Map<string, any>, conn?: TallyTarget, timeoutMs?: number, options?: TallySendOptions): Promise<string> {
     try {
 
         // remove targetCompany from lstVariables if found with default value
@@ -384,8 +519,11 @@ async function sendTallyXml(xml: string, lstVariables: Map<string, any>, conn?: 
             Object.defineProperty(o, k, { enumerable: true, value: v });
         });
 
-        let xmlRequest = nEnv.renderString(xml, o);
-        let xmlResponse = await postTallyXML(xmlRequest, conn, timeoutMs);
+        let tRender = Date.now();
+        let xmlRequest = getTemplate(xml).render(o);
+        let renderMs = Date.now() - tRender;
+
+        let xmlResponse = await postTallyXML(xmlRequest, conn, timeoutMs, options, renderMs);
         return xmlResponse;
     } catch (err) {
         throw err;
@@ -393,59 +531,234 @@ async function sendTallyXml(xml: string, lstVariables: Map<string, any>, conn?: 
 }
 
 /**
- * Posts XML to Tally. The session connection is read on every call so a runtime change
- * takes effect immediately; a caller may target a specific host:port instead (used by port probes)
- * @param conn optional host:port override, defaults to the session connection
- * @param timeoutMs optional socket inactivity timeout after which the request is aborted
+ * Posts XML to Tally with a bounded budget and a bounded internal retry.
+ * The session connection is read on every call so a runtime change takes effect immediately;
+ * a caller may target a specific host:port instead (used by port probes).
+ *
+ * Retry rules: only a connection-level failure is retried (refused, reset, hang up, connect
+ * timeout), never an answer from Tally, and never after any response bytes have arrived. A read
+ * is retried on any of these; a write is retried only when the connection was never established,
+ * so a voucher or master can never be posted twice. An attempt which used the whole budget is
+ * not retried because there is no budget left, and the error then says so and marks itself transient
  */
-async function postTallyXML(xml: string, conn?: TallyTarget, timeoutMs?: number): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
+async function postTallyXML(xml: string, conn?: TallyTarget, timeoutMs?: number, options?: TallySendOptions, renderMs?: number): Promise<string> {
+    const target: TallyTarget = conn || tallyConnection;
+    const idempotent = options?.idempotent === true;
+    const label = options?.label || (idempotent ? 'read' : 'write');
+    const isProbe = typeof timeoutMs == 'number' && timeoutMs > 0;
+    const budgetMs = isProbe ? timeoutMs : tallyTimeoutMs;
+    const deadline = Date.now() + budgetMs;
+    const maxAttempts = isProbe ? 1 : 1 + tallyRetryMax;
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let tAttempt = Date.now();
         try {
+            let result = await postTallyXMLOnce(xml, target, idempotent, deadline, attempt);
+            let fields = { label, host: target.host, port: target.port, attempt, render_ms: renderMs, queue_ms: result.timing.queueMs, connect_ms: result.timing.connectMs, ttfb_ms: result.timing.ttfbMs, total_ms: result.timing.totalMs, bytes: result.timing.bytes, reused: result.timing.reused };
+            if (result.timing.totalMs >= tallySlowCallMs || attempt > 1)
+                logInfo('http', 'slow or retried Tally call', fields);
+            else
+                logDebug('http', 'Tally call', fields);
+            return result.body;
+        } catch (err) {
+            lastError = err;
+            let outcome = classifyTransportError(err, target, idempotent, attempt);
+            let elapsedMs = Date.now() - tAttempt;
+            let remainingMs = deadline - Date.now();
+            let backoffMs = tallyRetryBackoffMs[Math.min(attempt - 1, tallyRetryBackoffMs.length - 1)];
+            let canRetry = outcome.retryable && attempt < maxAttempts && remainingMs > backoffMs + tallyConnectTimeoutMs;
 
-            let target: TallyTarget = conn || tallyConnection;
+            logWarn('http', canRetry ? 'Tally call failed, retrying' : 'Tally call failed', {
+                label, host: target.host, port: target.port, attempt, phase: outcome.phase, code: outcome.code,
+                connected: outcome.timing?.connected, headers: outcome.timing?.headersReceived, reused: outcome.timing?.reused,
+                elapsed_ms: elapsedMs, remaining_ms: Math.max(remainingMs, 0), retryable: outcome.retryable, error: outcome.error.message.substring(0, 160)
+            });
 
+            if (!canRetry)
+                throw outcome.error;
+            await sleep(backoffMs);
+        }
+    }
+    throw lastError; // unreachable, the loop always throws or returns
+}
+
+/**
+ * Error raised by a single attempt, carrying the phase timing collected so far
+ */
+class TallyAttemptError extends Error {
+    constructor(readonly cause_: unknown, readonly timing: TallyAttemptTiming) {
+        super(cause_ instanceof Error ? cause_.message : String(cause_));
+        this.name = 'TallyAttemptError';
+    }
+}
+
+/**
+ * Turns whatever an attempt threw into the error the caller sees, and decides whether it may be retried
+ */
+function classifyTransportError(err: unknown, target: TallyTarget, idempotent: boolean, attempt: number): { error: Error, retryable: boolean, phase: TallyTransportPhase, code: string, timing?: TallyAttemptTiming } {
+    let timing = err instanceof TallyAttemptError ? err.timing : undefined;
+    let cause: any = err instanceof TallyAttemptError ? err.cause_ : err;
+    let connected = timing?.connected === true;
+    let headersReceived = timing?.headersReceived === true;
+    let phase: TallyTransportPhase = headersReceived ? 'response' : (connected ? 'response' : 'connect');
+
+    if (cause instanceof TallyTransportError)
+        return { error: cause, retryable: !headersReceived && (idempotent || !connected), phase: cause.phase, code: cause.code, timing };
+
+    let code: string = (cause && typeof cause == 'object' && typeof cause.code == 'string') ? cause.code : (cause instanceof Error ? cause.message : String(cause));
+
+    if (code === 'ECONNREFUSED') {
+        let error: NodeJS.ErrnoException = new Error('Unable to connect to Tally. Ensure Tally is running and XML server is enabled on port ' + target.port + ' by going to Help (F1) > Settings > Connectivity in Tally and setting Client / Server configuration, set Tally Prime is action as Server');
+        error.code = code;
+        return { error, retryable: true, phase: 'connect', code, timing };
+    }
+
+    // connection-level failures before any response bytes: the request may be re-sent for a read;
+    // for a write only when the connection was never established, so nothing could have reached Tally
+    const connectionCodes = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'ENOTFOUND']);
+    let isConnectionLevel = connectionCodes.has(code) || /socket hang up/i.test(code);
+    if (isConnectionLevel && !headersReceived) {
+        let retryable = idempotent || !connected;
+        let error = new TallyTransportError(phase, code, attempt, `The connection to Tally on ${target.host}:${target.port} was ${connected ? 'dropped before Tally answered' : 'not established'}.`);
+        return { error, retryable, phase, code, timing };
+    }
+
+    let error = cause instanceof Error ? cause : new Error(String(cause));
+    return { error, retryable: false, phase, code, timing };
+}
+
+/**
+ * One HTTP attempt against Tally with three separate deadlines: the connect deadline starts
+ * when a socket is assigned (queue time waiting for a free pooled socket is not charged to it),
+ * and the overall deadline caps the attempt at whatever is left of the call budget
+ */
+function postTallyXMLOnce(xml: string, target: TallyTarget, idempotent: boolean, deadline: number, attempt: number): Promise<{ body: string, timing: TallyAttemptTiming }> {
+    return new Promise((resolve, reject) => {
+        const t0 = Date.now();
+        let tSocket = 0, tConnect = 0, tHeaders = 0;
+        let bytes = 0;
+        let settled = false;
+        let timing: TallyAttemptTiming = { queueMs: 0, connectMs: 0, ttfbMs: 0, totalMs: 0, bytes: 0, reused: false, connected: false, headersReceived: false };
+        let connectTimer: NodeJS.Timeout | undefined;
+        let budgetTimer: NodeJS.Timeout | undefined;
+
+        const remainingMs = deadline - t0;
+        if (remainingMs <= 0) {
+            reject(new TallyAttemptError(new TallyTransportError('queue', 'budget-exhausted', attempt, 'No time was left in the call budget to send the request.'), timing));
+            return;
+        }
+
+        const snapshot = () => {
+            const now = Date.now();
+            timing.queueMs = tSocket ? tSocket - t0 : now - t0;
+            timing.connectMs = tConnect && tSocket ? tConnect - tSocket : 0;
+            timing.ttfbMs = tHeaders ? tHeaders - (tConnect || tSocket || t0) : 0;
+            timing.totalMs = now - t0;
+            timing.bytes = bytes;
+        };
+
+        const finish = (err?: unknown, body?: string) => {
+            if (settled)
+                return;
+            settled = true;
+            if (connectTimer)
+                clearTimeout(connectTimer);
+            if (budgetTimer)
+                clearTimeout(budgetTimer);
+            snapshot();
+            if (err !== undefined)
+                reject(new TallyAttemptError(err, timing));
+            else
+                resolve({ body: body || '', timing });
+        };
+
+        try {
             let req = http.request({
                 hostname: target.host,
                 port: target.port,
-                path: '',
+                path: '/',
                 method: 'POST',
+                agent: idempotent ? tallyReadAgent : tallyWriteAgent,
                 headers: {
                     'Content-Length': Buffer.byteLength(xml, 'utf16le'),
                     'Content-Type': 'text/xml;charset=utf-16'
                 }
             },
                 (res) => {
+                    tHeaders = Date.now();
+                    timing.headersReceived = true;
                     let data = '';
                     res
                         .setEncoding('utf16le')
                         .on('data', (chunk) => {
                             let result = chunk.toString() || '';
+                            bytes += result.length;
                             data += result;
                         })
-                        .on('end', () => {
-                            resolve(data);
-                        })
-                        .on('error', (httpErr) => {
-                            reject(httpErr);
-                        });
+                        .on('end', () => finish(undefined, data))
+                        .on('error', (httpErr) => finish(httpErr));
                 });
-            if (typeof timeoutMs == 'number' && timeoutMs > 0)
-                req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
 
-            req.on('error', (reqError: NodeJS.ErrnoException) => {
-                let errorType = reqError['code'] || reqError['message'];
-                if (errorType === 'ECONNREFUSED')
-                    reject('Unable to connect to Tally. Ensure Tally is running and XML server is enabled on port ' + target.port + ' by going to Help (F1) > Settings > Connectivity in Tally and setting Client / Server configuration, set Tally Prime is action as Server');
-                else
-                    reject(reqError);
+            req.on('socket', (socket) => {
+                tSocket = Date.now();
+                timing.reused = (req as any).reusedSocket === true;
+                if (socket.connecting) {
+                    socket.once('connect', () => {
+                        tConnect = Date.now();
+                        timing.connected = true;
+                    });
+                    connectTimer = setTimeout(() => {
+                        if (!timing.connected)
+                            req.destroy(new TallyTransportError('connect', 'connect-timeout', attempt, `No TCP connection to Tally on ${target.host}:${target.port} within ${tallyConnectTimeoutMs}ms.`));
+                    }, Math.min(tallyConnectTimeoutMs, Math.max(deadline - Date.now(), 1)));
+                }
+                else {
+                    tConnect = tSocket;
+                    timing.connected = true;
+                }
             });
+
+            budgetTimer = setTimeout(() => {
+                let phase: TallyTransportPhase = timing.connected ? 'response' : (tSocket ? 'connect' : 'queue');
+                let detail = timing.headersReceived
+                    ? `Tally started answering but the response did not complete (${bytes} characters received).`
+                    : (timing.connected ? 'The request reached Tally but no response arrived.' : 'The request was still waiting for a connection to Tally.');
+                req.destroy(new TallyTransportError(phase, 'timeout', attempt, detail));
+            }, remainingMs);
+
+            req.on('error', (reqError) => finish(reqError));
             req.write(xml, 'utf16le');
             req.end();
         }
         catch (err) {
-            reject(err);
+            finish(err);
         }
     });
+}
+
+/**
+ * One-time initialisation moved off the request path: compiles every template and sends one
+ * lightweight Company query to the default Tally so the keep-alive socket is open before the
+ * first tool call. Never throws; an unreachable Tally is only logged, since it may be started later
+ */
+export async function warmTallyConnection(): Promise<void> {
+    let t0 = Date.now();
+    let templateCount = 0;
+    try {
+        templateCount = precompileTemplates();
+    } catch (err) {
+        logWarn('warmup', 'template precompile failed', { error: err instanceof Error ? err.message : String(err) });
+    }
+    let tTemplates = Date.now() - t0;
+
+    let tQuery = Date.now();
+    try {
+        let result = await runCollectionQuery('Company', ['Name'], new Map<string, string>(), undefined, undefined, undefined, undefined, 5000);
+        logInfo('warmup', 'Tally answered', { host: tallyConnection.host, port: tallyConnection.port, companies: result.rows.length, templates: templateCount, templates_ms: tTemplates, query_ms: Date.now() - tQuery, budget_ms: tallyTimeoutMs, connect_timeout_ms: tallyConnectTimeoutMs });
+    } catch (err) {
+        logWarn('warmup', 'Tally did not answer, first tool call will connect instead', { host: tallyConnection.host, port: tallyConnection.port, templates: templateCount, templates_ms: tTemplates, query_ms: Date.now() - tQuery, error: err instanceof Error ? err.message.substring(0, 160) : String(err) });
+    }
 }
 
 /**
@@ -581,9 +894,7 @@ function extractReport(reportConfig: m.ModelPullReportInfo, reportInputParams: M
         try {
 
             let parseString = (iStr: string): string => {
-                iStr = utility.String.unescapeHTML(iStr);
-                iStr = iStr.replace(/&#\d+;/g, ''); //remove unreadable characters;
-                return iStr;
+                return utility.String.normaliseName(iStr); //decode any second-layer escaping, then strip control characters (numeric references were previously dropped as unreadable)
             }
 
             let parseDate = (iDate: string): Date | null => {
@@ -635,7 +946,7 @@ function extractReport(reportConfig: m.ModelPullReportInfo, reportInputParams: M
                             else if (datatype == 'date')
                                 value = parseDate(_value);
                             else if (datatype == 'boolean')
-                                value = _value == '1';
+                                value = parseTallyBoolean(_value); //same coercion as collections, accepts 1/0 and Yes/No
                             else if (datatype == 'quantity')
                                 value = parseQuantity(_value);
                             else
@@ -653,7 +964,7 @@ function extractReport(reportConfig: m.ModelPullReportInfo, reportInputParams: M
             }
 
             let tmplXML = lstReportXml.get(reportConfig.name) || '';
-            let respContent = await sendTallyXml(tmplXML, reportInputParams);
+            let respContent = await sendTallyXml(tmplXML, reportInputParams, undefined, undefined, { idempotent: true, label: `report:${reportConfig.name}` });
 
             if (!respContent) {
                 retval.error = 'Empty data received from Tally';
@@ -671,14 +982,23 @@ function extractReport(reportConfig: m.ModelPullReportInfo, reportInputParams: M
 
             let xmlParser = new XMLParser({
                 parseTagValue: false,
+                htmlEntities: true, //decode numeric character references at parse time
                 isArray(tagName) {
                     return (tagName == 'ROW' || tagName.endsWith('.LIST'))
                 },
             });
+            // the XML parse is synchronous and blocks the event loop for its duration, so it is timed
+            // to show whether a large response delays other requests
+            let tParse = Date.now();
             let resultObj = xmlParser.parse(respContent);
 
             let data: any[] = processRows(resultObj['DATA']['ROW'], reportConfig.output);
             retval.data = data;
+            let parseMs = Date.now() - tParse;
+            if (parseMs >= 1000)
+                logInfo('parse', 'slow report parse', { report: reportConfig.name, chars: respContent.length, rows: data.length, parse_ms: parseMs });
+            else
+                logDebug('parse', 'report parsed', { report: reportConfig.name, chars: respContent.length, rows: data.length, parse_ms: parseMs });
 
         } catch (err) {
             throw err;

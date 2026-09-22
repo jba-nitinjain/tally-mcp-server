@@ -74,6 +74,59 @@ class _utility {
                 .replace(/\&gt;/g, ">")
                 .replace(/\&quot;/g, "\"")
                 .replace(/\&apos;/g, "'");
+        },
+
+        /**
+         * Decodes XML / HTML character references in a single pass: the five predefined
+         * entities (&amp; &lt; &gt; &quot; &apos;) plus decimal (&#13;) and hexadecimal (&#x41;)
+         * numeric references. Being one pass, "&amp;#13;" yields the literal text "&#13;" and an
+         * unterminated "&#13" (no semicolon) is left untouched
+         * @param value {string} Text possibly carrying character references
+         * @returns {string} Decoded text
+         */
+        decodeEntities(value: string): string {
+            if (typeof value !== 'string' || value.indexOf('&') === -1)
+                return value;
+            return value.replace(/&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|(amp|lt|gt|quot|apos));/g, (match, dec: string, hex: string, named: string) => {
+                if (named)
+                    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[named] as string;
+                let codePoint = dec ? parseInt(dec, 10) : parseInt(hex, 16);
+                if (isNaN(codePoint) || codePoint > 0x10FFFF)
+                    return match;
+                try {
+                    return String.fromCodePoint(codePoint);
+                } catch {
+                    return match;
+                }
+            });
+        },
+
+        /**
+         * Normalises a master name (ledger, group, company, stock item, party, voucher type ...) so that
+         * the same helper can be applied to names coming out of Tally and to names supplied by a caller:
+         * character references are decoded once, every run of control characters (CR, LF, TAB ...) is
+         * replaced by a single space and the result is trimmed. Tally keeps accidental CR/LF pairs at the
+         * end of some master names; those are stripped here deliberately so a name emitted by one tool
+         * can be passed verbatim to another. Ordinary internal spacing is preserved
+         * @param value {string} Raw or escaped name
+         * @returns {string} Decoded and trimmed name
+         */
+        normaliseName(value: string): string {
+            if (typeof value !== 'string')
+                return value;
+            return this.decodeEntities(value)
+                .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+                .trim();
+        },
+
+        /**
+         * Key used to match two master names tolerantly: normalised, whitespace runs collapsed
+         * and case folded. Two names sharing a key differ only by case or spacing
+         * @param value {string} Name
+         * @returns {string} Comparison key
+         */
+        nameKey(value: string): string {
+            return this.normaliseName(value).replace(/\s+/g, ' ').toLowerCase();
         }
     }
     Number = {

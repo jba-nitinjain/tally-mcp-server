@@ -20,12 +20,12 @@ Running several Tally Prime instances at once (say different versions or differe
 
 ## Download
 Avoid cloning repository directly. Utility is available for download (with required dependencies) on below link <br>
-[https://excelkida.com/resource/tally-mcp-server-v7.7.0.zip](https://excelkida.com/resource/tally-mcp-server-v7.7.0.zip)
+[https://excelkida.com/resource/tally-mcp-server-v7.8.0.zip](https://excelkida.com/resource/tally-mcp-server-v7.8.0.zip)
 
 One-click installer **extension** for **Claude Desktop**<br>
-[https://excelkida.com/resource/tally-mcp-server-v7.7.0.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.7.0.mcpb)
+[https://excelkida.com/resource/tally-mcp-server-v7.8.0.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.8.0.mcpb)
 
-Last updated: version **7.7.0** [18-Sep-2026]
+Last updated: version **7.8.0** [22-Sep-2026]
 
 Refer docs/CHANGELOG.md for details
 
@@ -126,10 +126,12 @@ One thing to be aware of: Claude Desktop runs a single copy of this server for t
 
 ## Available Tools
 
-This server currently exposes 41 MCP tools. Tools that write back into Tally Prime (create / update / delete of masters and vouchers) can be hidden altogether via the `BLOCK_WRITE` setting described under Environment Variables.
+This server currently exposes 40 MCP tools. Tools that write back into Tally Prime (create / update / delete of masters and vouchers) can be hidden altogether via the `BLOCK_WRITE` setting described under Environment Variables.
+
+**The company is never implicit.** Every tool that reads or writes company data takes a **mandatory** `targetCompany`, which must name one of the companies open in Tally exactly as `server-info` lists them. A call that leaves it out, or names a company that is not open, is refused with the list of open companies; the company Tally happens to have in focus is never used as a default. Every such response carries a `company` property naming the company it was served from, and every cached table carries a `company` column on each row, so a figure can always be tied back to its company. The former `set-company` tool was removed in v7.8.0, since Tally did not reliably honour the switch for later requests.
 
 ### server-info
-Reports the build and connectivity state of this server. Call it first whenever a tool returns no data or behaves unexpectedly — an unreachable Tally and a Tally with no company loaded both look like an empty result everywhere else.
+Reports the build and connectivity state of this server, including the exact names of the companies open in Tally which every data and write tool needs as `targetCompany`. Call it first whenever a tool returns no data or behaves unexpectedly — an unreachable Tally and a Tally with no company loaded both look like an empty result everywhere else.
 
 **Input**
 No input.
@@ -227,12 +229,12 @@ Queries a Tally collection for selected fields and caches output in an in-memory
 |--|--|
 |collection|Collection name|
 |fields|Array of field names to fetch|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |fromDate (optional)|Date in YYYY-MM-DD|
 |toDate (optional)|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "tableID": "..." }`
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row)
 
 ### list-master
 Fetches list of masters for validation and auto-completion.
@@ -240,12 +242,12 @@ Fetches list of masters for validation and auto-completion.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |collection|One of: `group`, `ledger`, `vouchertype`, `unit`, `godown`, `stockgroup`, `stockitem`, `costcategory`, `costcentre`, `attendancetype`, `company`, `currency`, `gstin`, `gstclassification`|
 |containsFilter (optional)|filter to apply CONTAINS operation to restrict values|
 
 **Output**
-JSON: `{ "list": [ ... ] }`
+JSON: `{ "list": [ ... ], "company": "..." }`
 
 ### chart-of-accounts
 Extracts Chart of Accounts (or Group hierarchy) useful for preparing Balance Sheet, Profit and Loss, Trial Balance
@@ -253,10 +255,10 @@ Extracts Chart of Accounts (or Group hierarchy) useful for preparing Balance She
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `ledger_name`
 1. `group_name`
 1. `primary_group`
@@ -271,13 +273,13 @@ Fetches trial balance for period.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |fromDate|Date in YYYY-MM-DD|
 |toDate|Date in YYYY-MM-DD|
 |group_name (optional)|Filter by group name|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `ledger_name`
 1. `group_name`
 1. `opening_balance` (number) [**negative** = Debit / **positive** = Credit]
@@ -291,12 +293,12 @@ Fetches profit and loss data for period.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |fromDate|Date in YYYY-MM-DD|
 |toDate|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `ledger_name`
 1. `group_name`
 1. `closing_balance` (number) [**negative** = Debit / **positive** = Credit]
@@ -307,12 +309,12 @@ Fetches balance sheet data for period.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |fromDate|Date in YYYY-MM-DD|
 |toDate|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `ledger_name`
 1. `group_name`
 1. `closing_balance` (number) [**negative** = Debit / **positive** = Credit]
@@ -323,13 +325,13 @@ Fetches stock item summary for period.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |fromDate|Date in YYYY-MM-DD|
 |toDate|Date in YYYY-MM-DD|
 |stockGroup (optional)|Filter by stock group name|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `stock_item_name`
 1. `stock_group_name`
 1. `opening_quantity` (number)
@@ -347,12 +349,12 @@ Returns ledger closing balance as on date.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |ledgerName|Exact ledger name|
 |toDate|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "amount": number }` where negative = Debit and positive = Credit.
+JSON: `{ "amount": number, "company": "..." }` where negative = Debit and positive = Credit.
 
 ### stock-item-balance
 Returns stock item closing quantity as on date.
@@ -360,12 +362,12 @@ Returns stock item closing quantity as on date.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |itemName|Exact stock item name|
 |toDate|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "quantity": number, "unit_of_measurement": string }` when found.
+JSON: `{ "quantity": number, "unit_of_measurement": string, "company": "..." }` when found.
 
 ### bills-outstanding
 Fetches receivable/payable bill-wise outstanding as on date.
@@ -373,12 +375,12 @@ Fetches receivable/payable bill-wise outstanding as on date.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |nature|`receivable` or `payable`|
 |toDate|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `bill_date`
 1. `reference_number`
 1. `outstanding_amount`
@@ -391,13 +393,13 @@ Fetches ledger account statement for period.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |ledgerName|Ledger name|
 |fromDate|Date in YYYY-MM-DD|
 |toDate|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `guid`
 1. `date`
 1. `voucher_type`
@@ -413,13 +415,13 @@ Fetches stock item account statement for period.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |itemName|Stock item name|
 |fromDate|Date in YYYY-MM-DD|
 |toDate|Date in YYYY-MM-DD|
 
 **Output**
-JSON: `{ "tableID": "..." }` with columns:
+JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also carries a `company` column on every row) with columns:
 1. `date`
 1. `voucher_type`
 1. `voucher_number`
@@ -438,7 +440,7 @@ Creates or updates one or more ledger.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of ledger master objects to create/update|
 
 Master ledger object accepts following
@@ -459,7 +461,7 @@ Master ledger object accepts following
 |gstRegistrationDetails|(optional) GST registration details like GST Number, Registration Type, Place of Supply (state)|
 
 **Output**
-JSON result returned by import operation (success/failure details).
+JSON result returned by import operation (success/failure details) with the `company` written to.
 
 ### delete-master
 Delete one (or more) masters from Tally
@@ -467,12 +469,12 @@ Delete one (or more) masters from Tally
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |collection|Type of master or collection to delete. One of: `group`, `ledger`, `vouchertype`, `unit`, `godown`, `stockgroup`, `stockitem`, `costcategory`, `costcentre`, `attendancetype`, `company`, `currency`, `gstin`, `gstclassification` |
 |name|array of name(s) of master to be deleted|
 
 **Output**
-JSON result returned by delete operation (count of deleted, skipped, etc).
+JSON result returned by delete operation (count of deleted, skipped, etc) with the `company` written to.
 
 ### group-create-update
 Create or update accounting group(s), i.e. the chart of accounts node under which ledgers are nested.
@@ -480,7 +482,7 @@ Create or update accounting group(s), i.e. the chart of accounts node under whic
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of group objects|
 
 Every object of `masters` supports:
@@ -494,7 +496,7 @@ Every object of `masters` supports:
 |isCostCentre (optional)|Cost centres applicable for ledgers of this group|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### stock-group-create-update
 Create or update stock group(s) under which stock items are nested.
@@ -502,11 +504,11 @@ Create or update stock group(s) under which stock items are nested.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of stock group objects with properties `name`, `_name` (optional), `parent` (optional), `isQuantityAddable` (optional)|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### unit-create-update
 Create or update unit(s) of measurement. Supports a simple unit (like `Nos`, `Kgs`) and a compound unit (like `Box of 12 Nos`).
@@ -514,7 +516,7 @@ Create or update unit(s) of measurement. Supports a simple unit (like `Nos`, `Kg
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of unit objects|
 
 Every object of `masters` supports:
@@ -527,7 +529,7 @@ Every object of `masters` supports:
 |baseUnit / additionalUnit / conversion|Specify all 3 together to create a compound unit. `conversion` is the count of base units in one additional unit|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### godown-create-update
 Create or update godown(s) or warehouse(s) where stock is stored.
@@ -535,11 +537,11 @@ Create or update godown(s) or warehouse(s) where stock is stored.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of godown objects with properties `name`, `_name` (optional), `parent` (optional), `address` (optional array of address lines), `isExternal` (optional)|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### cost-category-create-update
 Create or update cost category(ies) used to group cost centres for parallel allocation.
@@ -547,11 +549,11 @@ Create or update cost category(ies) used to group cost centres for parallel allo
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of cost category objects with properties `name`, `_name` (optional), `allocateRevenue` (optional), `allocateNonRevenue` (optional)|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### cost-centre-create-update
 Create or update cost centre(s) or profit centre(s) used to track income and expenses of a department, branch, project or employee.
@@ -559,11 +561,11 @@ Create or update cost centre(s) or profit centre(s) used to track income and exp
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of cost centre objects with properties `name`, `_name` (optional), `category` (optional, default `Primary Cost Category`), `parent` (optional)|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### stock-item-create-update
 Create or update stock item(s), i.e. the product or material forming part of inventory.
@@ -571,7 +573,7 @@ Create or update stock item(s), i.e. the product or material forming part of inv
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of stock item objects|
 
 Every object of `masters` supports:
@@ -590,7 +592,7 @@ Every object of `masters` supports:
 |gstDetails (optional)|`hsnCode`, `hsnDescription`, `typeOfSupply` (`Goods` / `Services`), `taxability` (`Taxable` / `Exempt` / `Nil Rated`) and `rate` (total GST rate, split internally into CGST, SGST and IGST)|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### voucher-create-update
 Create accounting and / or inventory vouchers (transactions like Payment, Receipt, Contra, Journal, Sales, Purchase, Credit Note, Debit Note, Delivery Note, Receipt Note, Stock Journal), or update an existing voucher when its `guid` is supplied.
@@ -600,7 +602,7 @@ Sign convention followed across the whole tool is **debit is negative and credit
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |vouchers|Array of voucher objects|
 
 Every object of `vouchers` supports:
@@ -640,7 +642,7 @@ Every object of `inventoryEntries` supports:
 |accountingLedger (optional)|Sales / purchase / stock adjustment ledger to which the value is posted. Mandatory for an invoice like Sales or Purchase|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### voucher-delete
 Delete one (or more) vouchers from Tally permanently. This operation cannot be undone.
@@ -648,11 +650,11 @@ Delete one (or more) vouchers from Tally permanently. This operation cannot be u
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |vouchers|Array of objects containing `guid`, `date`, `voucherType` and optional `voucherNumber`. All of these are available in the output of `ledger-account` tool|
 
 **Output**
-JSON result returned by delete operation (count of deleted records).
+JSON result returned by delete operation (count of deleted records) with the `company` written to.
 
 ### company-create-update
 Create a new company, or update details of an existing one.
@@ -679,7 +681,7 @@ Every object of `masters` supports:
 |gstin / incomeTaxNumber (optional)|GST number and PAN of the company|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### stock-category-create-update
 Create or update stock category(ies), the parallel classification of stock items that cuts across stock groups.
@@ -687,11 +689,11 @@ Create or update stock category(ies), the parallel classification of stock items
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of objects with properties `name`, `_name` (optional), `parent` (optional)|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### voucher-type-create-update
 Create or update voucher type(s). Every voucher type is derived from one of the predefined types.
@@ -699,7 +701,7 @@ Create or update voucher type(s). Every voucher type is derived from one of the 
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of voucher type objects|
 
 Every object of `masters` supports:
@@ -714,7 +716,7 @@ Every object of `masters` supports:
 |prefix (optional)|Prefix applied to the voucher number like `INV/`|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### currency-create-update
 Create or update currency(ies) used for recording foreign currency transactions.
@@ -722,7 +724,7 @@ Create or update currency(ies) used for recording foreign currency transactions.
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of currency objects|
 
 Every object of `masters` supports:
@@ -737,7 +739,7 @@ Every object of `masters` supports:
 |isSymbolSuffixed / hasSpaceBetweenAmount / showInMillions (optional)|Presentation flags|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### gst-classification-create-update
 Create or update GST classification(s), a reusable set of HSN / SAC and GST rate details applicable to many stock items and ledgers at once.
@@ -745,11 +747,11 @@ Create or update GST classification(s), a reusable set of HSN / SAC and GST rate
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of objects with `name`, `_name` (optional), `hsnCode` (optional), `hsnDescription` (optional), `typeOfSupply` (optional), `taxability` (optional) and `rate` (total GST rate, split internally into CGST, SGST and IGST)|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### budget-create-update
 Create or update budget(s) for a period, with closing balance targets against groups, ledgers and cost centres. Debit is negative and credit is positive, so an expense target is a negative amount. At least one of the three target arrays must be supplied.
@@ -757,7 +759,7 @@ Create or update budget(s) for a period, with closing balance targets against gr
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of budget objects|
 
 Every object of `masters` supports:
@@ -772,7 +774,7 @@ Every object of `masters` supports:
 |costCentreBudgets (optional)|Array of `name` and `amount`|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### pay-head-create-update
 Create or update payroll pay head(s), the earning, deduction or contribution components used while processing salary. A pay head is internally a ledger, so it also shows up in `list-master` with collection as `ledger`.
@@ -780,7 +782,7 @@ Create or update payroll pay head(s), the earning, deduction or contribution com
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of pay head objects|
 
 Every object of `masters` supports:
@@ -800,7 +802,7 @@ Every object of `masters` supports:
 |isBillWise (optional)|Maintain bill wise details, typically for loans and advances|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### employee-create-update
 Create or update payroll employee(s) or employee group(s). Tally stores an employee as a cost centre flagged for payroll, so employees also show up in `list-master` with collection as `costcentre`.
@@ -808,7 +810,7 @@ Create or update payroll employee(s) or employee group(s). Tally stores an emplo
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of employee objects|
 
 Every object of `masters` supports:
@@ -826,7 +828,7 @@ Every object of `masters` supports:
 |bankDetails (optional)|`bankName`, `accountNumber` and `ifscCode` used for salary payment|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### attendance-type-create-update
 Create or update payroll attendance, leave or production type(s) like Present, Absent, Overtime or Piece Production.
@@ -834,7 +836,7 @@ Create or update payroll attendance, leave or production type(s) like Present, A
 **Input**
 |Argument|Description|
 |--|--|
-|targetCompany (optional)|Company name (defaults to active company)|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
 |masters|Array of attendance type objects|
 
 Every object of `masters` supports:
@@ -848,18 +850,7 @@ Every object of `masters` supports:
 |productionType / unit|Both mandatory when `attendanceType` is `User Defined`|
 
 **Output**
-JSON result returned by import operation (count of created / altered records).
-
-### set-company
-Sets active company context in Tally Prime.
-
-**Input**
-|Argument|Description|
-|--|--|
-|companyName|Company name to activate|
-
-**Output**
-JSON string: `"OK"` on success.
+JSON result returned by import operation (count of created / altered records) with the `company` written to.
 
 ### set-period
 Sets active reporting period context in Tally Prime.

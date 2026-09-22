@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "tally-mcp-server",
   "display_name": "Tally Prime",
-  "version": "7.7.0",
+  "version": "7.8.0",
   "description": "Expose Tally Prime ERP data to MCP-compatible clients like Claude Desktop.",
   "author": {
     "name": "Dhananjay Gokhale",
@@ -57,7 +57,7 @@
   "tools": [
     {
       "name": "server-info",
-      "description": "returns the build and connectivity state of this Tally Prime MCP server: its version, whether write tools are exposed, the Tally host and port it talks to along with connectionSource (default from the extension settings, or session when chosen through set-tally-connection) and the default host and port it started with, whether Tally answered, the list of companies open in Tally and which one is active. call this first whenever a tool returns no data or behaves unexpectedly, since an unreachable Tally and a Tally with no company loaded both look like empty results everywhere else"
+      "description": "returns the build and connectivity state of this Tally Prime MCP server: its version, whether write tools are exposed, the Tally host and port it talks to along with connectionSource (default from the extension settings, or session when chosen through set-tally-connection) and the default host and port it started with, whether Tally answered, the list of companies open in Tally and which one is active. every data and write tool requires targetCompany naming one of the companies listed here, exactly as listed, so call this to learn the names. call this first whenever a tool returns no data or behaves unexpectedly, since an unreachable Tally and a Tally with no company loaded both look like empty results everywhere else"
     },
     {
       "name": "list-tally-instances",
@@ -81,59 +81,55 @@
     },
     {
       "name": "query-database",
-      "description": "executes sql query on pglite postgres in-memory database for querying cached Tally Prime report data in table generated as output by other tools (in tableID property from tool output response). These tables are temporary and will be dropped after 15 minutes automatically. Use this tool to run complex analytical queries to aggregate, filter, sort results"
+      "description": "executes sql query on pglite postgres in-memory database for querying cached Tally Prime report data in table generated as output by other tools (in tableID property from tool output response). These tables are temporary and will be dropped after 15 minutes automatically. Use this tool to run complex analytical queries to aggregate, filter, sort results. every cached table carries a company column naming the Tally company its rows came from"
     },
     {
       "name": "query-collection",
-      "description": "queries a Tally Prime collection with selected fields and optional context like target company and reporting period. result is cached in pglite postgres in-memory table and returned as tableID. Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "queries a Tally Prime collection with selected fields and optional context like target company and reporting period. result is cached in pglite postgres in-memory table and returned as tableID. Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "list-master",
-      "description": "fetches list of masters from Tally Prime collection e.g. group, ledger, vouchertype, unit, godown, stockgroup, stockitem, costcategory, costcentre, attendancetype, company, currency, gstin, gstclassification returns output in JSON string array in the property list"
+      "description": "fetches list of masters from Tally Prime collection e.g. group, ledger, vouchertype, unit, godown, stockgroup, stockitem, costcategory, costcentre, attendancetype, company, currency, gstin, gstclassification returns output in JSON string array in the property list. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "chart-of-accounts",
-      "description": "fetches chart of accounts or GL hierarchy with fields ledger_name, group_name, primary_group, bs_pl, dr_cr, affects_gross_profit, sort_position. the column bs_pl will have values false = Balance Sheet / true = Profit Loss. Column dr_cr as value true = Debit / false = Credit. primary_group is the primary group of parent or group, under which ledger is nested. The columns group and parent are tree structure represented in flat format. The column affects_gross_profit has values true / false, it is used to determine if ledger under this group will affect gross profit or not. sort_position determines position or placement order with respect to items of same level for display, returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "fetches chart of accounts or GL hierarchy with fields ledger_name, group_name, primary_group, bs_pl, dr_cr, affects_gross_profit, sort_position. the column bs_pl will have values false = Balance Sheet / true = Profit Loss. Column dr_cr as value true = Debit / false = Credit. primary_group is the primary group of parent or group, under which ledger is nested. The columns group and parent are tree structure represented in flat format. The column affects_gross_profit has values true / false, it is used to determine if ledger under this group will affect gross profit or not. sort_position determines position or placement order with respect to items of same level for display, returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "trial-balance",
-      "description": "fetches trial balance with fields ledger_name, group_name (blank if Profit & Loss), opening_balance, net_debit, net_credit, closing_balance. opening_balance and closing_balance negative is debit and positive is credit. kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "fetches trial balance with fields ledger_name, group_name (blank if Profit & Loss), opening_balance, net_debit, net_credit, closing_balance. opening_balance and closing_balance negative is debit and positive is credit. kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "profit-loss",
-      "description": "fetches profit and loss statement with fields like ledger_name, group_name, closing_balance. closing_balance negative is debit or expense and positive is credit or income. closing stock to be treated as credit, kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. for detailed ledger level analysis call trial-balance tool, returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "fetches profit and loss statement with fields like ledger_name, group_name, closing_balance. closing_balance negative is debit or expense and positive is credit or income. closing stock to be treated as credit, kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. for detailed ledger level analysis call trial-balance tool, returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "balance-sheet",
-      "description": "fetches balance sheet with fields like ledger_name, group_name (blank if Profit & Loss A/c), closing_balance. closing balance negative is debit or asset and positive is credit or liability. kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "fetches balance sheet with fields like ledger_name, group_name (blank if Profit & Loss A/c), closing_balance. closing balance negative is debit or asset and positive is credit or liability. kindly fetch data from chart-of-accounts tool to pull group hierarchy before calling this tool. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "stock-summary",
-      "description": "fetches stock item summary with fields stock_item_name, stock_group_name, opening_quantity, opening_value, inward_quantity, inward_value, outward_quantity, outward_value, closing_quantity, closing_value, returns output cached in pglite postgres in-memory table (specified in tableID property). synonyms (name=stock item / parent=stock group) Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "fetches stock item summary with fields stock_item_name, stock_group_name, opening_quantity, opening_value, inward_quantity, inward_value, outward_quantity, outward_value, closing_quantity, closing_value, returns output cached in pglite postgres in-memory table (specified in tableID property). synonyms (name=stock item / parent=stock group) Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "ledger-balance",
-      "description": "fetches ledger closing balance as on date, negative is debit and positive is credit, display Dr for Debit or Cr for Credit after the amount for better readability, instead of negative amount flip Debit or Credit to make it positive"
+      "description": "fetches ledger closing balance as on date, negative is debit and positive is credit, display Dr for Debit or Cr for Credit after the amount for better readability, instead of negative amount flip Debit or Credit to make it positive. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "stock-item-balance",
-      "description": "fetches stock item remaining quantity balance as on date, tool returns quantity and unit of measurement"
+      "description": "fetches stock item remaining quantity balance as on date, tool returns quantity and unit of measurement. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "bills-outstanding",
-      "description": "fetches pending overdue outstanding bills receivable or payable as on date with fields bill_date,reference_number,outstanding_amount,party_name,overdue_days. outstanding_amount = Debit is negative and Credit is positive. party_name = ledger_name. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "fetches pending overdue outstanding bills receivable or payable as on date with fields bill_date,reference_number,outstanding_amount,party_name,overdue_days. outstanding_amount = Debit is negative and Credit is positive. party_name = ledger_name. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "ledger-account",
-      "description": "fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
+      "description": "fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "stock-item-account",
-      "description": "fetches GL stock item account statement with voucher level details containing fields date, voucher_type, voucher_number, party_name, quantity, amount, narration, tracking_number, voucher_category. party_name = ledger_name. quantity = inward as positive and outward as negative. amount = debit is negative and credit is positive, narration = notes / remarks. for calculating closing balance of quantity, consider rows with tracking_number as empty as it is, but for rows with tracking_number having text value, then duplicate rows need to be removed by preparing intermediate output with aggregation of tracking_number and voucher_category with sum of quantity and then comparing quantity of Receipt Note with Purchase and Delivery Note with Sales to identify and remove the rows with Receipt Note and Delivery Note if they are found to be tracked fully / partially . returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis"
-    },
-    {
-      "name": "set-company",
-      "description": "sets the active company context in Tally Prime. This changes the global company context used by Tally for subsequent operations and report queries"
+      "description": "fetches GL stock item account statement with voucher level details containing fields date, voucher_type, voucher_number, party_name, quantity, amount, narration, tracking_number, voucher_category. party_name = ledger_name. quantity = inward as positive and outward as negative. amount = debit is negative and credit is positive, narration = notes / remarks. for calculating closing balance of quantity, consider rows with tracking_number as empty as it is, but for rows with tracking_number having text value, then duplicate rows need to be removed by preparing intermediate output with aggregation of tracking_number and voucher_category with sum of quantity and then comparing quantity of Receipt Note with Purchase and Delivery Note with Sales to identify and remove the rows with Receipt Note and Delivery Note if they are found to be tracked fully / partially . returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "set-period",
@@ -141,47 +137,47 @@
     },
     {
       "name": "ledger-create-update",
-      "description": "create or update ledger master data in Tally Prime, returns success count of created and / or altered records"
+      "description": "create or update ledger master data in Tally Prime, returns success count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "delete-master",
-      "description": "deletes a master object from selected collection in Tally Prime and returns success count of deleted records"
+      "description": "deletes a master object from selected collection in Tally Prime and returns success count of deleted records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "group-create-update",
-      "description": "create or update accounting group (chart of accounts node under which ledgers are nested) in Tally Prime, returns count of created and / or altered records"
+      "description": "create or update accounting group (chart of accounts node under which ledgers are nested) in Tally Prime, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "stock-group-create-update",
-      "description": "create or update stock group (group under which stock items are nested) in Tally Prime, returns count of created and / or altered records"
+      "description": "create or update stock group (group under which stock items are nested) in Tally Prime, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "unit-create-update",
-      "description": "create or update unit of measurement used by stock items in Tally Prime, supports simple unit (like Nos, Kgs) and compound unit (like Box of 12 Nos), returns count of created and / or altered records"
+      "description": "create or update unit of measurement used by stock items in Tally Prime, supports simple unit (like Nos, Kgs) and compound unit (like Box of 12 Nos), returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "godown-create-update",
-      "description": "create or update godown or warehouse or storage location of stock items in Tally Prime, returns count of created and / or altered records"
+      "description": "create or update godown or warehouse or storage location of stock items in Tally Prime, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "cost-category-create-update",
-      "description": "create or update cost category used to group cost centres for parallel allocation in Tally Prime, returns count of created and / or altered records"
+      "description": "create or update cost category used to group cost centres for parallel allocation in Tally Prime, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "cost-centre-create-update",
-      "description": "create or update cost centre or profit centre used to track income and expenses of a department, branch, project or employee in Tally Prime, returns count of created and / or altered records"
+      "description": "create or update cost centre or profit centre used to track income and expenses of a department, branch, project or employee in Tally Prime, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "stock-item-create-update",
-      "description": "create or update stock item (product or material forming part of inventory) in Tally Prime, returns count of created and / or altered records"
+      "description": "create or update stock item (product or material forming part of inventory) in Tally Prime, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "voucher-create-update",
-      "description": "creates accounting and / or inventory vouchers (transactions like payment, receipt, contra, journal, sales, purchase, debit note, credit note, delivery note, receipt note, stock journal) in Tally Prime, or updates an existing voucher when its guid is supplied. amount convention is debit is negative and credit is positive, and the sum of all amounts of a voucher must be zero. quantity is always an absolute positive number, since inward or outward movement is derived by Tally from the voucher type. when guid is supplied the voucher is fully replaced by the supplied content, so send every entry of that voucher and not just the changed one. guid of an existing voucher can be picked from the output of ledger-account tool. returns count of created and / or altered records"
+      "description": "creates accounting and / or inventory vouchers (transactions like payment, receipt, contra, journal, sales, purchase, debit note, credit note, delivery note, receipt note, stock journal) in Tally Prime, or updates an existing voucher when its guid is supplied. amount convention is debit is negative and credit is positive, and the sum of all amounts of a voucher must be zero. quantity is always an absolute positive number, since inward or outward movement is derived by Tally from the voucher type. when guid is supplied the voucher is fully replaced by the supplied content, so send every entry of that voucher and not just the changed one. guid of an existing voucher can be picked from the output of ledger-account tool. returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "voucher-delete",
-      "description": "deletes vouchers (transactions) from Tally Prime permanently and returns count of deleted records. every voucher is identified by its guid, which along with date, voucher type and voucher number can be picked from the output of ledger-account tool. this operation cannot be undone, so confirm with the user before calling this tool"
+      "description": "deletes vouchers (transactions) from Tally Prime permanently and returns count of deleted records. every voucher is identified by its guid, which along with date, voucher type and voucher number can be picked from the output of ledger-account tool. this operation cannot be undone, so confirm with the user before calling this tool. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "company-create-update",
@@ -189,35 +185,35 @@
     },
     {
       "name": "stock-category-create-update",
-      "description": "create or update stock category, which is a parallel classification of stock items cutting across stock groups, returns count of created and / or altered records"
+      "description": "create or update stock category, which is a parallel classification of stock items cutting across stock groups, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "voucher-type-create-update",
-      "description": "create or update a voucher type in Tally Prime, which is always derived from one of the predefined voucher types like Sales, Purchase, Payment, Receipt, Journal, Contra, Stock Journal, returns count of created and / or altered records"
+      "description": "create or update a voucher type in Tally Prime, which is always derived from one of the predefined voucher types like Sales, Purchase, Payment, Receipt, Journal, Contra, Stock Journal, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "currency-create-update",
-      "description": "create or update a currency in Tally Prime, used for recording transactions in a foreign currency, returns count of created and / or altered records"
+      "description": "create or update a currency in Tally Prime, used for recording transactions in a foreign currency, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "gst-classification-create-update",
-      "description": "create or update a GST classification, which is a reusable set of HSN / SAC and GST rate details that can be applied on many stock items and ledgers at once, returns count of created and / or altered records"
+      "description": "create or update a GST classification, which is a reusable set of HSN / SAC and GST rate details that can be applied on many stock items and ledgers at once, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "budget-create-update",
-      "description": "create or update a budget in Tally Prime for a period, with closing balance targets against groups, ledgers and cost centres. amount convention is debit is negative and credit is positive, so an expense budget is a negative amount. returns count of created and / or altered records"
+      "description": "create or update a budget in Tally Prime for a period, with closing balance targets against groups, ledgers and cost centres. amount convention is debit is negative and credit is positive, so an expense budget is a negative amount. returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "pay-head-create-update",
-      "description": "create or update a payroll pay head in Tally Prime, which is the earning, deduction or contribution component used while processing salary. a pay head is internally a ledger, so it also appears in list-master with collection as ledger. returns count of created and / or altered records"
+      "description": "create or update a payroll pay head in Tally Prime, which is the earning, deduction or contribution component used while processing salary. a pay head is internally a ledger, so it also appears in list-master with collection as ledger. returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "employee-create-update",
-      "description": "create or update a payroll employee or employee group in Tally Prime. Tally stores an employee as a cost centre flagged for payroll, so employees also appear in list-master with collection as costcentre. returns count of created and / or altered records"
+      "description": "create or update a payroll employee or employee group in Tally Prime. Tally stores an employee as a cost centre flagged for payroll, so employees also appear in list-master with collection as costcentre. returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     },
     {
       "name": "attendance-type-create-update",
-      "description": "create or update a payroll attendance, leave or production type in Tally Prime like Present, Absent, Overtime or Piece Production, returns count of created and / or altered records"
+      "description": "create or update a payroll attendance, leave or production type in Tally Prime like Present, Absent, Overtime or Piece Production, returns count of created and / or altered records. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
     }
   ],
   "tools_generated": false,

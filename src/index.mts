@@ -1,6 +1,8 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerMcpServer } from './mcp.mjs'
+import { warmTallyConnection } from './tally.mjs'
 
 const mcpServer = await registerMcpServer();
 const transport = new StdioServerTransport(); // Start receiving messages on stdin and sending messages on stdout
 await mcpServer.connect(transport); // Connect to the MCP server
+void warmTallyConnection(); // compile templates and open the Tally connection now, not on the first tool call (logs to stderr only)

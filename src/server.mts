@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { registerMcpServer } from './mcp.mjs'
+import { warmTallyConnection } from './tally.mjs'
 
 
 const mcpPort = parseInt(process.env.PORT || '3000');
@@ -415,4 +416,8 @@ app.post('/token', (req, res) => {
 });
 
 // Start MCP Server listener
-app.listen(mcpPort, () => console.log(`MCP Server started on port ${mcpPort}`));
+app.listen(mcpPort, () => {
+  console.log(`MCP Server started on port ${mcpPort}`);
+  // compile templates and open the Tally connection now rather than on the first tool call
+  void warmTallyConnection();
+});

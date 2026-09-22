@@ -25,7 +25,7 @@
                         <XMLTAG>DATA</XMLTAG>
                     </FORM>
                     <PART NAME="MyPart01">
-                        <LINES>MyLine01,MyLineOp</LINES>
+                        <LINES>MyLine01,MyLineOp,MyLineCl</LINES>
                         <REPEAT>MyLine01 : MyCollection</REPEAT>
                         <SCROLLED>Vertical</SCROLLED>
                     </PART>
@@ -35,6 +35,10 @@
                     </LINE>
                     <LINE NAME="MyLineOp">
                         <FIELDS>FldDateOp,FldVoucherTypeOp,FldAmountOp</FIELDS>
+                        <XMLTAG>ROW</XMLTAG>
+                    </LINE>
+                    <LINE NAME="MyLineCl">
+                        <FIELDS>FldDateCl,FldVoucherTypeCl,FldAmountCl,FldPrimaryGroupCl,FldIsIntegratedCl</FIELDS>
                         <XMLTAG>ROW</XMLTAG>
                     </LINE>
                     <FIELD NAME="FldGuid">
@@ -80,6 +84,26 @@
                     <FIELD NAME="FldAmountOp">
                         <SET>if $$IsDebit:$OpeningBalance:Ledger:"{{ ledgerName }}" then -$$NumValue:$OpeningBalance:Ledger:"{{ ledgerName }}" else $$NumValue:$OpeningBalance:Ledger:"{{ ledgerName }}"</SET>
                         <XMLTAG>amount</XMLTAG>
+                    </FIELD>
+                    <FIELD NAME="FldDateCl">
+                        <SET>##SVToDate</SET>
+                        <XMLTAG>date</XMLTAG>
+                    </FIELD>
+                    <FIELD NAME="FldVoucherTypeCl">
+                        <SET>"Closing"</SET>
+                        <XMLTAG>voucher_type</XMLTAG>
+                    </FIELD>
+                    <FIELD NAME="FldAmountCl">
+                        <SET>if $$IsDebit:$ClosingBalance:Ledger:"{{ ledgerName }}" then -$$NumValue:$ClosingBalance:Ledger:"{{ ledgerName }}" else $$NumValue:$ClosingBalance:Ledger:"{{ ledgerName }}"</SET>
+                        <XMLTAG>amount</XMLTAG>
+                    </FIELD>
+                    <FIELD NAME="FldPrimaryGroupCl">
+                        <SET>$_PrimaryGroup:Ledger:"{{ ledgerName }}"</SET>
+                        <XMLTAG>primary_group</XMLTAG>
+                    </FIELD>
+                    <FIELD NAME="FldIsIntegratedCl">
+                        <SET>$IsIntegrated:Company:##SVCurrentCompany</SET>
+                        <XMLTAG>is_integrated</XMLTAG>
                     </FIELD>
                     <COLLECTION NAME="MyCollection">
                         <TYPE>Voucher</TYPE>
