@@ -4,7 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import { deleteMasters, deleteVouchers, fetchReport, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, resetTallyConnection, scanTallyInstances, setTallyConnection } from './tally.mjs';
+import { deleteMasters, deleteVouchers, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, scanTallyInstances, setTallyConnection } from './tally.mjs';
+import { fetchReport } from './report.mjs';
+import { fetchLedgerAccount } from './ledgeraccount.mjs';
+import { connectionStateFile, isConnectionPersisted } from './connection.mjs';
+import { isTallyTimeout, toTimeoutDetail } from './tallyerror.mjs';
 import { cacheTable, executeSQL } from './database.mjs';
 import { lstCollectionFields, lstOptionCountryState } from './definition.mjs';
 import { utility } from './utility.mjs';
@@ -125,70 +129,6 @@ function buildTableResult(tableID, lstRow, company) {
     return JSON.stringify({ tableID, rowCount: lstRow.length, company });
 }
 /**
- * Orders the rows of a ledger-account report as Opening, vouchers, Closing and checks that the
- * vouchers actually explain the movement between the two balances.
- *
- * Tally emits the two synthetic lines after the vouchers (Opening, then Closing). The Closing line also
- * carries the ledger's primary group and the company's "Integrate Accounts and Inventory" flag, which are
- * read here and never cached as columns. A statement whose vouchers do not add up to the closing balance
- * is reported as reconciled: false with a note, because an LLM caller would otherwise read an empty or
- * partial statement as proof that the ledger had no activity
- */
-function assembleLedgerAccount(lstRow) {
-    const isSynthetic = (r, voucherType) => r && !r.guid && r.voucher_type === voucherType;
-    const round2 = (n) => Math.round(n * 100) / 100;
-    const toNumber = (v) => (typeof v === 'number' && !isNaN(v)) ? v : 0;
-    const rows = lstRow.slice();
-    const idxClosing = rows.findIndex(r => isSynthetic(r, 'Closing'));
-    const closingRow = idxClosing >= 0 ? rows.splice(idxClosing, 1)[0] : undefined;
-    const idxOpening = rows.findIndex(r => isSynthetic(r, 'Opening'));
-    const openingRow = idxOpening >= 0 ? rows.splice(idxOpening, 1)[0] : undefined;
-    // the report output names the field party_ledger while the cached column is party_name; copy it across so the column is populated
-    const vouchers = rows.map(r => ({ ...r, party_name: r.party_name || r.party_ledger || '' }));
-    const opening = toNumber(openingRow?.amount);
-    const closing = toNumber(closingRow?.amount);
-    const movement = round2(vouchers.reduce((sum, r) => sum + toNumber(r.amount), 0));
-    const unexplained = round2(closing - opening - movement);
-    const balancesPresent = !!openingRow && !!closingRow;
-    const reconciled = balancesPresent && Math.abs(unexplained) <= 0.01;
-    const primaryGroup = String(closingRow?.primary_group || '').trim();
-    const isStockInHand = /^stock[\s-]*in[\s-]*hand$/i.test(primaryGroup);
-    const integratedRaw = String(closingRow?.is_integrated || '').trim().toLowerCase();
-    const isIntegrated = integratedRaw === 'yes' ? true : (integratedRaw === 'no' ? false : undefined);
-    const summary = {
-        reconciled,
-        unexplainedMovement: unexplained,
-        openingBalance: opening,
-        closingBalance: closing,
-        voucherCount: vouchers.length
-    };
-    if (!balancesPresent) {
-        summary.note = 'Tally did not return the Opening and Closing balance rows for this ledger, so the statement cannot be verified as complete. Treat it as "could not retrieve", not as "no transactions", and cross-check the ledger with trial-balance';
-    }
-    else if (isStockInHand) {
-        const source = isIntegrated === false
-            ? 'Integrate Accounts and Inventory is set to No for this company, so the balance is the closing stock value keyed into the ledger master'
-            : (isIntegrated === true
-                ? 'Integrate Accounts and Inventory is set to Yes for this company, so the balance is taken from the stock items (inventory masters)'
-                : 'the balance is derived from stock values (inventory masters or closing stock entered in the ledger master)');
-        summary.note = `This ledger sits under the primary group Stock-in-Hand. Tally values it from stock, not from vouchers: ${source}. `
-            + (reconciled
-                ? 'Opening and closing agree for this period, so there is no movement to explain'
-                : `The movement of ${unexplained} between opening ${opening} and closing ${closing} has no underlying vouchers and no narration to look for; it is not evidence of missing entries`)
-            + '. Use the stock-summary tool for the item-wise picture behind this balance';
-    }
-    else if (!reconciled) {
-        summary.note = `Opening ${opening} plus the ${vouchers.length} voucher amount(s) returned (${movement}) comes to ${round2(opening + movement)}, but Tally reports a closing balance of ${closing} for this ledger and period. ${unexplained} of movement is not explained by the rows returned, so this statement is incomplete and must not be read as "no activity". Likely causes: vouchers in which this ledger appears on more than one line (only the first line is picked up), or vouchers of a type the report excludes. Cross-check with trial-balance before relying on it`;
-    }
-    const ordered = [];
-    if (openingRow)
-        ordered.push(openingRow);
-    ordered.push(...vouchers);
-    if (closingRow)
-        ordered.push(closingRow);
-    return { rows: ordered, summary };
-}
-/**
  * Version reported to the MCP client, read from package.json of the deployment so that
  * the build actually running can be identified from the client
  */
@@ -206,13 +146,24 @@ function resolveServerVersion() {
  * Converts a thrown value into a readable message, since JSON.stringify() on an
  * Error instance yields an empty object hiding the reason of failure from the LLM
  */
-function formatError(err) {
+function formatError(err, period) {
+    if (isTallyTimeout(err))
+        return JSON.stringify(toTimeoutDetail(err, period)); // TALLY_TIMEOUT object: Tally did not deliver, which is never "no rows" (feedback #56)
     if (typeof err === 'string')
         return err;
     else if (err instanceof Error)
         return err.message;
     else
         return JSON.stringify(err);
+}
+/**
+ * Period of a report tool call, carried in a TALLY_TIMEOUT error so the caller knows what to split
+ */
+function periodOf(args) {
+    const a = (args || {});
+    const fromDate = typeof a.fromDate === 'string' ? a.fromDate : null;
+    const toDate = typeof a.toDate === 'string' ? a.toDate : null;
+    return fromDate || toDate ? { fromDate, toDate } : null;
 }
 /**
  * Builds a TDL string literal for a name: double quotes are doubled, as TDL expects
@@ -343,7 +294,7 @@ export async function registerMcpServer() {
         title: 'Tally Prime',
         version: resolveServerVersion()
     }, {
-        instructions: 'Several Tally Prime instances may run at once on this machine, each on its own port. At the start of every conversation, before calling any data or write tool, call list-tally-instances. If exactly one Tally answers, call set-tally-connection with that port and tell the user which port and companies you connected to. If more than one answers, show the user the ports with their companies and ask which one to use, then call set-tally-connection with the chosen port. If none answers, tell the user to enable the XML server in Tally (F1 > Settings > Connectivity > Client/Server configuration with TallyPrime acting as Server). The chosen connection stays in effect until it is changed with set-tally-connection or until this server process restarts, so a previous conversation may have left a different port selected. Always re-check at the start of a conversation rather than assuming the port. Master names (ledger, group, company, stock item, party, voucher type) are returned decoded and normalised: XML character references are resolved and leading, trailing and embedded control characters (CR, LF, TAB) are stripped, so a name taken from any tool output can be passed verbatim to any tool input. Name inputs are accepted in raw or escaped form and matched after the same normalisation; when a name is not found the error lists the closest names. Every data and write tool requires targetCompany naming one of the companies open in Tally, exactly as listed by server-info or list-tally-instances; there is no session-level company selection and the company Tally has in focus is never used as a default. Every response echoes the company it was served from in a company property, and every cached table carries a company column, so assert the company before using a figure'
+        instructions: 'Several Tally Prime instances may run at once on this machine, each on its own port. At the start of every conversation, before calling any data or write tool, call list-tally-instances. If exactly one Tally answers, call set-tally-connection with that port and tell the user which port and companies you connected to. If more than one answers, show the user the ports with their companies and ask which one to use, then call set-tally-connection with the chosen port. If none answers, tell the user to enable the XML server in Tally (F1 > Settings > Connectivity > Client/Server configuration with TallyPrime acting as Server). The chosen connection stays in effect until it is changed with set-tally-connection, including across relaunches of this server (it is persisted and lapses to the installed default after 12 hours without use), so a previous conversation may have left a different port selected. Always re-check at the start of a conversation rather than assuming the port. Master names (ledger, group, company, stock item, party, voucher type) are returned decoded and normalised: XML character references are resolved and leading, trailing and embedded control characters (CR, LF, TAB) are stripped, so a name taken from any tool output can be passed verbatim to any tool input. Name inputs are accepted in raw or escaped form and matched after the same normalisation; when a name is not found the error lists the closest names. Every data and write tool requires targetCompany naming one of the companies open in Tally, exactly as listed by server-info or list-tally-instances; there is no session-level company selection and the company Tally has in focus is never used as a default. Every response echoes the company it was served from in a company property, and every cached table carries a company column, so assert the company before using a figure. When Tally does not deliver a complete answer (it timed out, the connection was reset, or the answer was cut short) the tool returns an error object with code TALLY_TIMEOUT, elapsedMs, period and hint "split the period": that is never evidence of no data, so ask again for shorter periods. ledger-account already fetches a period longer than three months one month at a time and joins the months'
     });
     mcpServer.registerTool('server-info', {
         title: 'Server Info',
@@ -361,6 +312,10 @@ export async function registerMcpServer() {
             tallyHost: objConnection.host,
             tallyPort: objConnection.port,
             connectionSource: objConnection.source,
+            connectionPersisted: isConnectionPersisted(),
+            connectionStateFile: connectionStateFile(),
+            processId: process.pid,
+            processUptimeSeconds: Math.round(process.uptime()),
             defaultTallyHost: process.env.TALLY_HOST || 'localhost',
             defaultTallyPort: parseInt(process.env.TALLY_PORT || '9000')
         };
@@ -443,13 +398,13 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
     mcpServer.registerTool('set-tally-connection', {
         title: 'Set Tally Connection',
-        description: `sets the Tally Prime host and port used by every subsequent tool call in this server process, reads and writes alike, until it is changed again by another call to this tool or the server restarts. the port is probed before it is accepted, so an unreachable port leaves the previous connection in place and returns an error. call list-tally-instances first to find which ports have a Tally answering and which companies each one has open`,
+        description: `sets the Tally Prime host and port used by every subsequent tool call, reads and writes alike, until it is changed again by another call to this tool. the choice is persisted in a small state file, so it survives the server being relaunched by the MCP client, and lapses back to the installed default only after 12 hours without use; server-info then reports connectionSource session. the port is probed before it is accepted, so an unreachable port leaves the previous connection in place and returns an error. call list-tally-instances first to find which ports have a Tally answering and which companies each one has open`,
         inputSchema: {
             port: z.number().int().min(1).max(65535).describe('port on which the target Tally Prime instance serves XML requests, as reported by list-tally-instances'),
             host: z.string().optional().describe('optional host name or IP address of the target Tally Prime instance, defaults to the host of the current connection')
@@ -463,19 +418,18 @@ export async function registerMcpServer() {
     }, async (args) => {
         const objPrevious = getTallyConnection();
         try {
-            const objConnection = setTallyConnection(args.port, args.host);
-            const objInstance = await probeTallyInstance(objConnection.host, objConnection.port);
+            // probe first and switch only when Tally answers, so a mistyped port never replaces the
+            // connection in use, not even for a moment and not in the persisted state
+            const targetHost = (typeof args.host === 'string' && args.host.trim()) ? args.host.trim() : objPrevious.host;
+            const objInstance = await probeTallyInstance(targetHost, args.port);
             if (!objInstance) {
-                // Revert so that a mistyped port does not leave every later tool call pointing at nothing
-                if (objPrevious.source === 'default')
-                    resetTallyConnection();
-                else
-                    setTallyConnection(objPrevious.port, objPrevious.host);
                 return {
                     isError: true,
-                    content: [{ type: 'text', text: `No Tally Prime instance answered on ${objConnection.host}:${objConnection.port}. The connection stays on ${objPrevious.host}:${objPrevious.port}. Call list-tally-instances to find which ports have a Tally answering` }]
+                    content: [{ type: 'text', text: `No Tally Prime instance answered on ${targetHost}:${args.port}. The connection stays on ${objPrevious.host}:${objPrevious.port}. Call list-tally-instances to find which ports have a Tally answering` }]
                 };
             }
+            // stored in a state file as well as in this process, so it survives Claude Desktop relaunching the server (feedback #56)
+            const objConnection = setTallyConnection(args.port, targetHost);
             return {
                 content: [{
                         type: 'text',
@@ -484,7 +438,8 @@ export async function registerMcpServer() {
                             companies: objInstance.companies,
                             activeCompany: objInstance.activeCompany,
                             booksFrom: objInstance.booksFrom,
-                            message: `Connected to Tally on ${objConnection.host}:${objConnection.port} with ${objInstance.companies.length} companies open, active company ${objInstance.activeCompany ?? 'none'}`
+                            persisted: isConnectionPersisted(),
+                            message: `Connected to Tally on ${objConnection.host}:${objConnection.port} with ${objInstance.companies.length} companies open, active company ${objInstance.activeCompany ?? 'none'}. Every later call uses this port, also after the server is relaunched, until set-tally-connection is called again or it goes unused for 12 hours`
                         })
                     }]
             };
@@ -659,7 +614,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -697,7 +652,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -725,7 +680,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -759,7 +714,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -806,7 +761,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -856,7 +811,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -890,7 +845,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -922,7 +877,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -954,7 +909,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
@@ -987,13 +942,13 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
     });
     mcpServer.registerTool('ledger-account', {
         title: 'Ledger Account',
-        description: `fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). the first row is a synthetic "Opening" row (voucher_type Opening, date = fromDate, amount = opening balance) and the last row is a synthetic "Closing" row (voucher_type Closing, date = toDate, amount = closing balance as Tally reports it for the period, the same figure trial-balance gives); both have a blank guid and are not vouchers. the response also carries a reconciliation check: reconciled (true when opening + sum of voucher amounts equals closing within 0.01), unexplainedMovement (closing minus opening minus voucher amounts, positive = credit not covered by the rows returned, negative = debit), openingBalance, closingBalance, voucherCount and, whenever reconciled is false, a note explaining why. reconciled false means the statement is incomplete and must not be read as "no transactions"; for a ledger under primary group Stock-in-Hand the movement is derived from stock values and has no vouchers or narration behind it, so use stock-summary instead. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the response echoes the company the data was served from in a company property, which should be asserted against the company intended before any figure is used`,
+        description: `fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). the first row is a synthetic "Opening" row (voucher_type Opening, date = fromDate, amount = opening balance) and the last row is a synthetic "Closing" row (voucher_type Closing, date = toDate, amount = closing balance as Tally reports it for the period, the same figure trial-balance gives); both have a blank guid and are not vouchers. the response also carries a reconciliation check: reconciled (true when opening + sum of voucher amounts equals closing within 0.01), unexplainedMovement (closing minus opening minus voucher amounts, positive = credit not covered by the rows returned, negative = debit), openingBalance, closingBalance, voucherCount and, whenever reconciled is false, a note explaining why. reconciled false means the statement is incomplete and must not be read as "no transactions"; for a ledger under primary group Stock-in-Hand the movement is derived from stock values and has no vouchers or narration behind it, so use stock-summary instead. a period longer than three months is fetched one calendar month at a time and joined; the response then also carries chunked, chunkCount, chunkContinuity (each month's closing equals the next month's opening) and chunks (per-month balances and voucherCount). when Tally does not deliver in time the call returns an error object with code TALLY_TIMEOUT, elapsedMs, period, hint "split the period" and suggestedPeriods: call again once for each suggested period, and never read it as no transactions. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the response echoes the company the data was served from in a company property, which should be asserted against the company intended before any figure is used`,
         inputSchema: {
             targetCompany: targetCompanySchema,
             ledgerName: z.string().describe('ledger name, always verify if ledger exists using list-master tool with collection as ledger'),
@@ -1012,7 +967,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
         let inputParams = new Map([['fromDate', args.fromDate], ['toDate', args.toDate], ['ledgerName', args.ledgerName], ['targetCompany', company]]);
@@ -1024,18 +979,19 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
-        const resp = await fetchReport('ledger-account', inputParams);
-        if (resp.error) {
+        // a period longer than three months is fetched month by month; a Tally timeout comes back as a
+        // TALLY_TIMEOUT error object, never as an empty statement (feedback #56)
+        const statement = await fetchLedgerAccount(inputParams);
+        if (!statement.ok) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: resp.error }]
+                content: [{ type: 'text', text: statement.error }]
             };
         }
         else {
-            const statement = assembleLedgerAccount(Array.isArray(resp.data) ? resp.data : []);
             const tableId = await cacheCompanyTable(new Map([['guid', 'string'], ['date', 'date'], ['voucher_type', 'string'], ['voucher_number', 'string'], ['alternate_ledger', 'string'], ['party_name', 'string'], ['amount', 'number'], ['narration', 'string']]), statement.rows, company);
             const result = JSON.parse(buildTableResult(tableId, statement.rows, company));
             if (statement.rows.length > 0) {
@@ -1067,7 +1023,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
         let inputParams = new Map([['fromDate', args.fromDate], ['toDate', args.toDate], ['itemName', args.itemName], ['targetCompany', company]]);
@@ -1079,7 +1035,7 @@ export async function registerMcpServer() {
         catch (err) {
             return {
                 isError: true,
-                content: [{ type: 'text', text: formatError(err) }]
+                content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
             };
         }
         const resp = await fetchReport('stock-item-account', inputParams);

@@ -3,11 +3,13 @@ import net from 'node:net';
 import nunjucks from 'nunjucks';
 import { XMLParser } from 'fast-xml-parser';
 import { utility } from './utility.mjs';
-import { lstCollectionFields, lstPushXml, lstReportConfig, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers } from './definition.mjs';
+import { lstCollectionFields, lstPushXml, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers } from './definition.mjs';
 import { logDebug, logInfo, logWarn } from './log.mjs';
-const default_tally_port = parseInt(process.env.TALLY_PORT || '9000') || 9000; // default to 9000 XML port of Tally
-const default_tally_host = process.env.TALLY_HOST || 'localhost'; // default to localhost
-const lstPullReport = lstReportConfig;
+import { getTallyConnection, isValidPort } from './connection.mjs';
+import { TallyTransportError } from './tallyerror.mjs';
+import { assertCompleteEnvelope } from './envelope.mjs';
+export { getTallyConnection, setTallyConnection, resetTallyConnection } from './connection.mjs';
+export { TallyTransportError } from './tallyerror.mjs';
 // ---------------------------------------------------------------------------
 // Transport settings
 //
@@ -21,7 +23,7 @@ function envInt(name, fallback) {
     return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 /** overall budget for one Tally call, including internal retries */
-const tallyTimeoutMs = envInt('TALLY_TIMEOUT_MS', 45000);
+export const tallyTimeoutMs = envInt('TALLY_TIMEOUT_MS', 45000);
 /** time allowed to open the TCP connection (localhost normally connects within a few ms) */
 const tallyConnectTimeoutMs = envInt('TALLY_CONNECT_TIMEOUT_MS', 5000);
 /** calls slower than this are logged at info level even without TALLY_DEBUG */
@@ -41,57 +43,7 @@ const tallyReadAgent = new http.Agent({
 // Writes always open a fresh connection. A keep-alive socket which Tally closed while idle fails
 // with ECONNRESET on reuse; for a read that is retried, but a voucher post must never be re-sent
 const tallyWriteAgent = new http.Agent({ keepAlive: false, maxSockets: 1 });
-/**
- * A failure of the HTTP transport to Tally as opposed to an answer from Tally. Carries the phase
- * which failed, so the log shows whether the time went into connecting or into waiting for the
- * report, and states in plain words that an identical retry is expected to succeed
- */
-export class TallyTransportError extends Error {
-    phase;
-    code;
-    attempts;
-    retryable = true;
-    constructor(phase, code, attempts, detail) {
-        super(`Tally did not answer within the ${Math.round(tallyTimeoutMs / 1000)}s allowed (${phase} phase, ${code}, ${attempts} attempt${attempts == 1 ? '' : 's'}). ${detail} This is a transient connection condition and not a problem with the data requested: an identical retry is expected to succeed. If it keeps happening, check whether Tally Prime is showing a dialog box or is busy with another task`);
-        this.name = 'TallyTransportError';
-        this.phase = phase;
-        this.code = code;
-        this.attempts = attempts;
-    }
-}
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-// live connection used by every request. Earlier this was fixed at process start,
-// so a Tally running on another port could not be reached without a restart
-let tallyConnection = {
-    host: default_tally_host,
-    port: default_tally_port,
-    source: 'default'
-};
-function isValidPort(port) {
-    return typeof port == 'number' && Number.isInteger(port) && port >= 1 && port <= 65535;
-}
-export function getTallyConnection() {
-    return { ...tallyConnection };
-}
-/**
- * Points the session at a different Tally instance. Host defaults to the current host
- * @param port XML server port of Tally (1 to 65535)
- * @param host optional host name or IP address
- */
-export function setTallyConnection(port, host) {
-    if (!isValidPort(port))
-        throw new Error(`Invalid Tally port [${port}]. Port must be a whole number between 1 and 65535`);
-    let targetHost = (typeof host == 'string' && host.trim()) ? host.trim() : tallyConnection.host;
-    tallyConnection = { host: targetHost, port, source: 'session' };
-    return getTallyConnection();
-}
-/**
- * Restores the connection to the TALLY_HOST / TALLY_PORT defaults
- */
-export function resetTallyConnection() {
-    tallyConnection = { host: default_tally_host, port: default_tally_port, source: 'default' };
-    return getTallyConnection();
-}
 const nEnv = new nunjucks.Environment();
 nEnv.addFilter('formatDate', (dt, format) => {
     return utility.Date.format(dt, format);
@@ -153,63 +105,6 @@ export function parseTallyBoolean(value) {
         return false;
     return null;
 }
-export async function fetchReport(targetReport, inputParams) {
-    let retval = {
-        data: undefined
-    };
-    try {
-        let objReport = lstPullReport.find(p => p.name == targetReport);
-        if (objReport) {
-            let lstInputs = new Map();
-            //set target company
-            let targetCompany = '##SVCurrentCompany'; //default value
-            if (inputParams.has('targetCompany') && typeof inputParams.get('targetCompany') == 'string')
-                targetCompany = utility.String.normaliseName(inputParams.get('targetCompany')); //extract from request object, accepting raw or escaped form
-            lstInputs.set('targetCompany', targetCompany); //add targetCompany as one of the params
-            //populate input parameters value
-            for (let i = 0; i < objReport.input.length; i++) {
-                let iName = objReport.input[i].name;
-                let iType = objReport.input[i].datatype;
-                let _value = inputParams.get(iName);
-                //check if validation is required
-                if (objReport.input[i].validation_regex) {
-                    let strValidationRegex = objReport.input[i].validation_regex || '';
-                    let regPtrn = new RegExp(strValidationRegex, 'i');
-                    if (typeof _value == 'string' && !regPtrn.test(_value)) {
-                        retval.error = objReport.input[i].validation_message || `Invalid value for parameter ${iName}`;
-                        return retval;
-                    }
-                }
-                //parse the value based on type
-                if (typeof _value == 'number' && iType == 'number')
-                    lstInputs.set(iName, _value);
-                else if (typeof _value == 'boolean' && iType == 'boolean')
-                    lstInputs.set(iName, _value);
-                else if (typeof _value == 'string' && iType == 'date' && /^\d\d-\d\d-\d\d\d\d$/.test(_value)) //Date in DD-MM-YYYY
-                    lstInputs.set(iName, utility.Date.parse(_value, 'dd-MM-yyyy'));
-                else if (typeof _value == 'string' && iType == 'date' && /^\d\d\d\d-\d\d-\d\d/.test(_value)) //ISO DateTime YYYY-MM-DDTHH:MM:SS
-                    lstInputs.set(iName, utility.Date.parse(_value.substring(0, 10), 'yyyy-MM-dd'));
-                else if (typeof _value == 'string' && iType == 'string')
-                    lstInputs.set(iName, utility.String.normaliseName(_value)); //names (ledgerName, itemName) are accepted raw or escaped
-                else {
-                    retval.error = `Parameter ${iName} not found or contains invalid value [${_value}]`;
-                    return retval;
-                }
-            }
-            retval = await extractReport(objReport, lstInputs);
-        }
-        else
-            retval.error = 'Invalid report';
-    }
-    catch (err) {
-        // earlier every exception collapsed to 'Server exception', which hid a transport timeout
-        // (and its retry advice) from the caller
-        retval.error = err instanceof Error ? err.message : (typeof err == 'string' ? err : 'Server exception');
-    }
-    finally {
-        return retval;
-    }
-}
 export async function queryCollection(targetCollection, lstFields, lstFilters, targetCompany, fromDate, toDate, conn, timeoutMs) {
     let result = await runCollectionQuery(targetCollection, lstFields, lstFilters, targetCompany, fromDate, toDate, conn, timeoutMs);
     return result.rows;
@@ -247,6 +142,7 @@ async function runCollectionQuery(targetCollection, lstFields, lstFilters, targe
             objTemplateArgs.set('filters', objFilters); //add filters to template arguments
         }
         let respContent = await sendTallyXml(xmlQueryCollection, objTemplateArgs, conn, timeoutMs, { idempotent: true, label: `collection:${targetCollection}` }); //send XML to Tally and get response
+        assertCompleteEnvelope(respContent, false); //a DATA envelope cut short is a transport failure, never a shorter list
         let xmlParser = new XMLParser({
             parseTagValue: false,
             htmlEntities: true, //decode numeric character references (&#13; &#10; &#x41;) at parse time, not only the five named ones
@@ -406,7 +302,7 @@ export async function deleteVouchers(lstVoucher, targetCompany) {
  * @param timeoutMs optional overall budget for this call; when given, the call is a probe and is never retried
  * @param options idempotent reads are retried after a connection-level failure, writes are not
  */
-async function sendTallyXml(xml, lstVariables, conn, timeoutMs, options) {
+export async function sendTallyXml(xml, lstVariables, conn, timeoutMs, options) {
     try {
         // remove targetCompany from lstVariables if found with default value
         if (lstVariables.has('targetCompany') && lstVariables.get('targetCompany') == '##SVCurrentCompany') {
@@ -439,12 +335,14 @@ async function sendTallyXml(xml, lstVariables, conn, timeoutMs, options) {
  * not retried because there is no budget left, and the error then says so and marks itself transient
  */
 async function postTallyXML(xml, conn, timeoutMs, options, renderMs) {
-    const target = conn || tallyConnection;
+    const target = conn || getTallyConnection();
     const idempotent = options?.idempotent === true;
     const label = options?.label || (idempotent ? 'read' : 'write');
     const isProbe = typeof timeoutMs == 'number' && timeoutMs > 0;
     const budgetMs = isProbe ? timeoutMs : tallyTimeoutMs;
-    const deadline = Date.now() + budgetMs;
+    const t0 = Date.now();
+    // a caller running several requests under one budget (ledger-account chunks) passes its own deadline
+    const deadline = Math.min(t0 + budgetMs, options?.deadline ?? Number.POSITIVE_INFINITY);
     const maxAttempts = isProbe ? 1 : 1 + tallyRetryMax;
     let lastError;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -470,8 +368,13 @@ async function postTallyXML(xml, conn, timeoutMs, options, renderMs) {
                 connected: outcome.timing?.connected, headers: outcome.timing?.headersReceived, reused: outcome.timing?.reused,
                 elapsed_ms: elapsedMs, remaining_ms: Math.max(remainingMs, 0), retryable: outcome.retryable, error: outcome.error.message.substring(0, 160)
             });
-            if (!canRetry)
+            if (!canRetry) {
+                if (outcome.error instanceof TallyTransportError) {
+                    outcome.error.elapsedMs = Date.now() - t0; // reported to the caller as elapsedMs of TALLY_TIMEOUT
+                    outcome.error.attempts = attempt;
+                }
                 throw outcome.error;
+            }
             await sleep(backoffMs);
         }
     }
@@ -510,11 +413,18 @@ function classifyTransportError(err, target, idempotent, attempt) {
     // connection-level failures before any response bytes: the request may be re-sent for a read;
     // for a write only when the connection was never established, so nothing could have reached Tally
     const connectionCodes = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'ENOTFOUND']);
-    let isConnectionLevel = connectionCodes.has(code) || /socket hang up/i.test(code);
+    let isConnectionLevel = connectionCodes.has(code) || /socket hang up/i.test(code) || /^aborted$/i.test(cause?.message || '');
     if (isConnectionLevel && !headersReceived) {
         let retryable = idempotent || !connected;
         let error = new TallyTransportError(phase, code, attempt, `The connection to Tally on ${target.host}:${target.port} was ${connected ? 'dropped before Tally answered' : 'not established'}.`);
         return { error, retryable, phase, code, timing };
+    }
+    // the connection dropped part way through the answer (Node reports it as "aborted"): whatever
+    // arrived is incomplete, so it is a transport failure and never an empty result. Not retried,
+    // since Tally did the work and a re-send would repeat it in full
+    if (isConnectionLevel && headersReceived) {
+        let error = new TallyTransportError('response', 'aborted', attempt, `The connection to Tally on ${target.host}:${target.port} was dropped while the answer was arriving (${timing?.bytes ?? 0} characters received).`);
+        return { error, retryable: false, phase: 'response', code: 'aborted', timing };
     }
     let error = cause instanceof Error ? cause : new Error(String(cause));
     return { error, retryable: false, phase, code, timing };
@@ -637,10 +547,10 @@ export async function warmTallyConnection() {
     let tQuery = Date.now();
     try {
         let result = await runCollectionQuery('Company', ['Name'], new Map(), undefined, undefined, undefined, undefined, 5000);
-        logInfo('warmup', 'Tally answered', { host: tallyConnection.host, port: tallyConnection.port, companies: result.rows.length, templates: templateCount, templates_ms: tTemplates, query_ms: Date.now() - tQuery, budget_ms: tallyTimeoutMs, connect_timeout_ms: tallyConnectTimeoutMs });
+        logInfo('warmup', 'Tally answered', { host: getTallyConnection().host, port: getTallyConnection().port, companies: result.rows.length, templates: templateCount, templates_ms: tTemplates, query_ms: Date.now() - tQuery, budget_ms: tallyTimeoutMs, connect_timeout_ms: tallyConnectTimeoutMs });
     }
     catch (err) {
-        logWarn('warmup', 'Tally did not answer, first tool call will connect instead', { host: tallyConnection.host, port: tallyConnection.port, templates: templateCount, templates_ms: tTemplates, query_ms: Date.now() - tQuery, error: err instanceof Error ? err.message.substring(0, 160) : String(err) });
+        logWarn('warmup', 'Tally did not answer, first tool call will connect instead', { host: getTallyConnection().host, port: getTallyConnection().port, templates: templateCount, templates_ms: tTemplates, query_ms: Date.now() - tQuery, error: err instanceof Error ? err.message.substring(0, 160) : String(err) });
     }
 }
 /**
@@ -716,7 +626,7 @@ function isTcpPortOpen(host, port, timeoutMs) {
  * @param toPort defaults to 9999
  */
 export async function scanTallyInstances(host, fromPort = 9000, toPort = 9999) {
-    let targetHost = (typeof host == 'string' && host.trim()) ? host.trim() : tallyConnection.host;
+    let targetHost = (typeof host == 'string' && host.trim()) ? host.trim() : getTallyConnection().host;
     if (!isValidPort(fromPort) || !isValidPort(toPort))
         throw new Error(`Invalid port range [${fromPort}-${toPort}]. Ports must be whole numbers between 1 and 65535`);
     if (fromPort > toPort)
@@ -750,111 +660,5 @@ export async function scanTallyInstances(host, fromPort = 9000, toPort = 9999) {
         }
     }
     return retval.sort((a, b) => a.port - b.port);
-}
-function extractReport(reportConfig, reportInputParams) {
-    return new Promise(async (resolve, reject) => {
-        let retval = {
-            data: undefined
-        };
-        try {
-            let parseString = (iStr) => {
-                return utility.String.normaliseName(iStr); //decode any second-layer escaping, then strip control characters (numeric references were previously dropped as unreadable)
-            };
-            let parseDate = (iDate) => {
-                if (/^\d\d\d\d-\d\d-\d\d$/.test(iDate))
-                    return utility.Date.parse(iDate, 'yyyy-MM-dd');
-                else if (/^\d?\d-\w\w\w-\d\d\d\d$/.test(iDate))
-                    return utility.Date.parse(iDate, 'd-MMM-yyyy');
-                else if (/^\d?\d-\w\w\w-\d\d$/.test(iDate)) {
-                    return utility.Date.parse(iDate, 'd-MMM-yy');
-                }
-                else
-                    return null;
-            };
-            const parseQuantity = (iStr) => {
-                let regPatOutput = /^(-?\d+\.\d+|-?\d+)\s.+/g.exec(iStr);
-                if (regPatOutput && typeof regPatOutput[1] == 'string' && !isNaN(parseFloat(regPatOutput[1])))
-                    return parseFloat(regPatOutput[1]);
-                else
-                    return 0;
-            };
-            const parseNumber = (iNum) => {
-                if (!iNum)
-                    return 0;
-                else
-                    return parseFloat(iNum.replace(/[\(\),]+/g, ''));
-            };
-            const processRows = (targetObjRows, targetConfigFields) => {
-                let data = [];
-                let rowCount = targetObjRows.length;
-                //loop through rows
-                for (let r = 0; r < rowCount; r++) {
-                    let o = new Object();
-                    //loop through each field and extract value
-                    for (const prop of targetConfigFields) {
-                        let tagName = prop.name.toUpperCase();
-                        let datatype = prop.datatype;
-                        let fieldName = prop.name;
-                        let value = undefined;
-                        let _value = targetObjRows[r][tagName];
-                        if (_value !== undefined) {
-                            if (datatype == 'number')
-                                value = parseNumber(_value);
-                            else if (datatype == 'date')
-                                value = parseDate(_value);
-                            else if (datatype == 'boolean')
-                                value = parseTallyBoolean(_value); //same coercion as collections, accepts 1/0 and Yes/No
-                            else if (datatype == 'quantity')
-                                value = parseQuantity(_value);
-                            else
-                                value = parseString(_value);
-                        }
-                        Object.defineProperty(o, fieldName, { enumerable: true, value });
-                    }
-                    //add row to array
-                    data.push(o);
-                }
-                return data;
-            };
-            let tmplXML = lstReportXml.get(reportConfig.name) || '';
-            let respContent = await sendTallyXml(tmplXML, reportInputParams, undefined, undefined, { idempotent: true, label: `report:${reportConfig.name}` });
-            if (!respContent) {
-                retval.error = 'Empty data received from Tally';
-                return;
-            }
-            else if (respContent.startsWith('<EXCEPTION>')) {
-                let regErr = respContent.match(/<EXCEPTION>(.+)<\/EXCEPTION>/g);
-                let errorMessage = 'Unknown error';
-                if (regErr && regErr[0])
-                    errorMessage = regErr[0].substring(11, regErr[0].length - 12);
-                retval.error = errorMessage;
-                return;
-            }
-            let xmlParser = new XMLParser({
-                parseTagValue: false,
-                htmlEntities: true, //decode numeric character references at parse time
-                isArray(tagName) {
-                    return (tagName == 'ROW' || tagName.endsWith('.LIST'));
-                },
-            });
-            // the XML parse is synchronous and blocks the event loop for its duration, so it is timed
-            // to show whether a large response delays other requests
-            let tParse = Date.now();
-            let resultObj = xmlParser.parse(respContent);
-            let data = processRows(resultObj['DATA']['ROW'], reportConfig.output);
-            retval.data = data;
-            let parseMs = Date.now() - tParse;
-            if (parseMs >= 1000)
-                logInfo('parse', 'slow report parse', { report: reportConfig.name, chars: respContent.length, rows: data.length, parse_ms: parseMs });
-            else
-                logDebug('parse', 'report parsed', { report: reportConfig.name, chars: respContent.length, rows: data.length, parse_ms: parseMs });
-        }
-        catch (err) {
-            throw err;
-        }
-        finally {
-            resolve(retval);
-        }
-    });
 }
 //# sourceMappingURL=tally.mjs.map

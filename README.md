@@ -20,12 +20,12 @@ Running several Tally Prime instances at once (say different versions or differe
 
 ## Download
 Avoid cloning repository directly. Utility is available for download (with required dependencies) on below link <br>
-[https://excelkida.com/resource/tally-mcp-server-v7.8.1.zip](https://excelkida.com/resource/tally-mcp-server-v7.8.1.zip)
+[https://excelkida.com/resource/tally-mcp-server-v7.9.0.zip](https://excelkida.com/resource/tally-mcp-server-v7.9.0.zip)
 
 One-click installer **extension** for **Claude Desktop**<br>
-[https://excelkida.com/resource/tally-mcp-server-v7.8.1.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.8.1.mcpb)
+[https://excelkida.com/resource/tally-mcp-server-v7.9.0.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.9.0.mcpb)
 
-Last updated: version **7.8.1** [24/09/2026]
+Last updated: version **7.9.0** [24/09/2026]
 
 Refer docs/CHANGELOG.md for details
 
@@ -122,7 +122,7 @@ From your side the flow looks like this:
 
 You can switch at any moment by saying something like *switch to port 9001*. Claude checks that a Tally really answers on that port before switching, so a typo cannot silently send your data to nowhere.
 
-One thing to be aware of: Claude Desktop runs a single copy of this server for the whole application, not one per chat. A port chosen in one chat therefore stays selected for later chats until it is changed again or Claude Desktop is restarted. Claude re-checks the connection at the start of every conversation, so it will tell you which Tally it is talking to before doing anything else. The **server-info** tool reports it as well.
+One thing to be aware of: the port chosen is shared by every chat and survives the server being relaunched (Claude Desktop relaunches extensions on start-up, on reload and whenever one stops). It is kept in a small state file in the `.tally-mcp-server` folder of your user profile, so a port chosen in one chat stays selected for later chats until it is changed again, and lapses back to the default only after 12 hours without use (`TALLY_CONNECTION_TTL_HOURS`). Claude re-checks the connection at the start of every conversation, so it will tell you which Tally it is talking to before doing anything else. The **server-info** tool reports it as well.
 
 ## Available Tools
 
@@ -142,7 +142,9 @@ JSON containing:
 1. `writeToolsEnabled` — false when `BLOCK_WRITE` is set
 1. `tallyHost` / `tallyPort` — where this server is trying to reach Tally
 1. `connectionSource` — `default` when the host and port come from the extension settings / environment, `session` when they were chosen through `set-tally-connection`
-1. `defaultTallyHost` / `defaultTallyPort` — the connection the server started with, which it falls back to after a restart
+1. `connectionPersisted` / `connectionStateFile` — whether the session choice is stored in the state file which every relaunch of the server reads, and where that file is
+1. `processId` / `processUptimeSeconds` — which server process answered and for how long it has been running, so a relaunch is visible
+1. `defaultTallyHost` / `defaultTallyPort` — the installed default, used until `set-tally-connection` is called and again once the session choice lapses
 1. `tallyReachable` — whether Tally answered at all
 1. `companies` — companies open in Tally
 1. `activeCompany` and `booksFrom` — the current company context
@@ -165,7 +167,7 @@ JSON containing:
 1. `hint` — what to do next: connect, ask the user to choose, or start Tally / enable its XML port
 
 ### set-tally-connection
-Switches the Tally host and port used by every subsequent tool call (reads as well as writes) in this server process, until it is changed again or the server restarts. The port is probed first; if no Tally answers there the change is refused and the previous connection stays in place. Available even when `BLOCK_WRITE` is set.
+Switches the Tally host and port used by every subsequent tool call (reads as well as writes) until it is changed again. The choice is persisted, so it survives the server being relaunched, and lapses to the default after 12 hours without use; `server-info` reports `connectionSource` = `session` meanwhile. The port is probed first; if no Tally answers there the change is refused and the previous connection stays in place. Available even when `BLOCK_WRITE` is set.
 
 **Input**
 |Argument|Description|
@@ -408,6 +410,9 @@ JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also ca
 1. `party_name`
 1. `amount` (number) [**negative** = Debit / **positive** = Credit]
 1. `narration`
+
+A period longer than three months is fetched one calendar month at a time and joined into one statement; the response then also carries `chunked`, `chunkCount`, `chunkContinuity` and `chunks` (per-month balances). When Tally does not deliver in time the tool returns an error object instead of an empty statement:
+`{ "code": "TALLY_TIMEOUT", "reason": "timeout", "elapsedMs": 45012, "period": { "fromDate": "2025-04-01", "toDate": "2026-03-31" }, "hint": "split the period", "suggestedPeriods": [...], "message": "..." }`. `reason` is one of timeout, connect-timeout, reset, aborted, empty-response, truncated-response. Every other report tool answers a Tally transport failure with the same object
 
 ### stock-item-account
 Fetches stock item account statement for period.
@@ -872,6 +877,9 @@ End-users are free to hard-code few settings which needs to be applied
 |--|--|
 |TALLY_PORT|Port Number of XML Server of Tally used as the default connection when the server starts (*optional*, default is **9000**). When several Tally Prime instances run on different ports, the port can be switched per conversation through the **set-tally-connection** tool without changing this setting, see [Multiple Tally instances](#multiple-tally-instances)|
 |TALLY_HOST|Host name or IP where XML Server is running (*optional*, default is **localhost**)|
+|TALLY_TIMEOUT_MS|Time allowed for one Tally call, and for all the months of a chunked ledger-account together (*optional*, default is **45000**)|
+|TALLY_CONNECTION_TTL_HOURS|Hours without use after which a port chosen through set-tally-connection lapses back to TALLY_PORT (*optional*, default is **12**)|
+|TALLY_STATE_DIR|Folder of the state file holding the port chosen through set-tally-connection (*optional*, default is `.tally-mcp-server` in the user profile)|
 |BLOCK_WRITE|Controls if MCP completely blocks access of write functionality. Setting this flag to **1** (or **true** / **yes**) will completely hide write functionality tools (create / update / delete of masters and vouchers) from the tool list. [ **0 = Allow , 1 = Block** ] (optional, default is **0** i.e. allowed). For Claude Desktop this is exposed as the **Block Write Access** switch of the extension settings|
 |PORT|Tally MCP Server port number. Applicable only if Tally Prime MCP Server is deployed as Remote MCP server (*optional*, default is **3000**). Not applicable for Claude Desktop|
 |MCP_DOMAIN|Domain name of Tally MCP Server website (*optional*, default is https://localhost:9000). Not applicable for Claude Desktop|

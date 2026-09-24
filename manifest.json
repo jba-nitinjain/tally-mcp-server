@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "tally-mcp-server",
   "display_name": "Tally Prime",
-  "version": "7.8.1",
+  "version": "7.9.0",
   "description": "Expose Tally Prime ERP data to MCP-compatible clients like Claude Desktop.",
   "author": {
     "name": "Dhananjay Gokhale",
@@ -65,7 +65,7 @@
     },
     {
       "name": "set-tally-connection",
-      "description": "switches the Tally host and port used by every subsequent tool call of this server, reads as well as writes, until it is changed again or the server restarts. port is required (1 to 65535) and host is optional. the port is probed first and the change is refused, leaving the previous connection in place, if no Tally Prime answers there. use it after list-tally-instances when several Tally Prime instances run on different ports, or whenever the user asks to switch to another port. available even when Block Write Access is on"
+      "description": "switches the Tally host and port used by every subsequent tool call of this server, reads as well as writes, until it is changed again. the choice is persisted in a small state file, so it survives the server being relaunched, and lapses back to the default only after 12 hours without use; server-info reports connectionSource session meanwhile. port is required (1 to 65535) and host is optional. the port is probed first and the change is refused, leaving the previous connection in place, if no Tally Prime answers there. use it after list-tally-instances when several Tally Prime instances run on different ports, or whenever the user asks to switch to another port. available even when Block Write Access is on"
     },
     {
       "name": "metadata-collection",
@@ -125,7 +125,7 @@
     },
     {
       "name": "ledger-account",
-      "description": "fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
+      "description": "fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). a period longer than three months is fetched one calendar month at a time and joined, with each month reconciled and chained to the next. when Tally does not deliver in time the call returns an error object with code TALLY_TIMEOUT, elapsedMs, period and hint split the period (plus suggestedPeriods), never an empty statement. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "stock-item-account",

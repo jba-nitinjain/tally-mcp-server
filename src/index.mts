@@ -1,6 +1,9 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerMcpServer } from './mcp.mjs'
 import { warmTallyConnection } from './tally.mjs'
+import { guardProcess } from './log.mjs'
+
+guardProcess(); // a stray rejection must not end the process, which would drop the session connection
 
 const mcpServer = await registerMcpServer();
 const transport = new StdioServerTransport(); // Start receiving messages on stdin and sending messages on stdout

@@ -42,4 +42,14 @@ export function logInfo(area, message, fields) {
 export function logWarn(area, message, fields) {
     write('warn', area, message, fields);
 }
+/**
+ * Keeps a stray promise rejection from ending the server. Node exits on an unhandled rejection by
+ * default, and every exit makes the MCP client relaunch the server from scratch; up to v7.8.1 a
+ * ledger-account timeout ended the process this way (feedback #56). It is logged instead
+ */
+export function guardProcess() {
+    process.on('unhandledRejection', (reason) => {
+        logWarn('process', 'unhandled promise rejection caught, server kept running', { error: reason instanceof Error ? (reason.stack || reason.message).substring(0, 500) : String(reason) });
+    });
+}
 //# sourceMappingURL=log.mjs.map

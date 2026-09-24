@@ -6,6 +6,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { registerMcpServer } from './mcp.mjs'
 import { warmTallyConnection } from './tally.mjs'
+import { guardProcess } from './log.mjs'
+
+guardProcess(); // a stray rejection must not end the process, which would drop the session connection
 
 
 const mcpPort = parseInt(process.env.PORT || '3000');

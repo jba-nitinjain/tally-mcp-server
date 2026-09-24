@@ -25,3 +25,4 @@
 
 # packaged output
 *.mcpb
+/test/

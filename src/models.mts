@@ -13,6 +13,8 @@ export interface ModelPullReportInputInfo {
 export interface ModelPullResponse {
     data: any | undefined;
     error?: string;
+    /** set when Tally did not deliver a complete answer (code TALLY_TIMEOUT); error then carries it as JSON */
+    errorDetail?: import('./tallyerror.mjs').TallyTimeoutDetail;
 }
 
 export interface ModelPullReportInfo {
