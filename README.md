@@ -20,12 +20,12 @@ Running several Tally Prime instances at once (say different versions or differe
 
 ## Download
 Avoid cloning repository directly. Utility is available for download (with required dependencies) on below link <br>
-[https://excelkida.com/resource/tally-mcp-server-v7.8.0.zip](https://excelkida.com/resource/tally-mcp-server-v7.8.0.zip)
+[https://excelkida.com/resource/tally-mcp-server-v7.8.1.zip](https://excelkida.com/resource/tally-mcp-server-v7.8.1.zip)
 
 One-click installer **extension** for **Claude Desktop**<br>
-[https://excelkida.com/resource/tally-mcp-server-v7.8.0.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.8.0.mcpb)
+[https://excelkida.com/resource/tally-mcp-server-v7.8.1.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.8.1.mcpb)
 
-Last updated: version **7.8.0** [22-Sep-2026]
+Last updated: version **7.8.1** [24/09/2026]
 
 Refer docs/CHANGELOG.md for details
 

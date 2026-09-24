@@ -1,5 +1,10 @@
 # Release History
 
+### Version: v7.8.1 [24/09/2026]
+
+Fixed:
+* **TallyPrime 2.1 froze with the pop-up *Error in TDL. 'Collection:MyCollection' Could not find description!*** whenever employees were read: listing the **Employee** collection through **list-master** or **query-collection**, the existence check run by **employee-create-update**, or the name check run by **delete-master**. Employees were requested from Tally as object type `Employee`, which TallyPrime 2.1 does not know; the pop-up is modal, so Tally stopped answering every later request until someone clicked OK, and the calls in between timed out. Employees are now read as what Tally stores them as, cost centres flagged for payroll (`CostCentre` filtered on `$ForPayroll`), which every release understands, and an employee is deleted as that cost centre. Collection definitions can now name the Tally object type and a built-in filter separately from the collection name (`tallyType`, `tallyFilter`). Every other collection (Company, Ledger, Group, VoucherType, Unit, Godown, StockGroup, StockCategory, StockItem, CostCategory, CostCentre, Currency, GSTClassification, AttendanceType, Budget, Bill) was checked against TallyPrime 2.1 and answers without error
+
 ### Version: v7.8.0 [22-Sep-2026]
 
 Changed:

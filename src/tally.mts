@@ -308,15 +308,17 @@ async function runCollectionQuery(targetCollection: string, lstFields: string[],
         if (toDate)
             objTemplateArgs.set('toDate', toDate);
 
-        objTemplateArgs.set('collection', targetCollection);
-
         let objCollection: m.TallyCollectionDefinition = lstCollectionFields.filter(c => c.collection == targetCollection)[0]; //load collection definition
+        objTemplateArgs.set('collection', objCollection.tallyType || targetCollection);
+
         let lstQueryFields = objCollection.fields.filter(f => lstFields.includes(f.name)); //filter fields based on user query
         objTemplateArgs.set('fields', lstQueryFields); //filter fields queried by user
 
-        if (lstFilters && lstFilters.size > 0) {
+        if (objCollection.tallyFilter || (lstFilters && lstFilters.size > 0)) {
             let objFilters: m.TallyFilterDefinition[] = [];
-            for (const [k, v] of lstFilters.entries()) {
+            if (objCollection.tallyFilter)
+                objFilters.push({ name: 'BuiltIn', expression: objCollection.tallyFilter });
+            for (const [k, v] of (lstFilters || new Map<string, string>()).entries()) {
                 objFilters.push({
                     name: k,
                     expression: v
@@ -472,7 +474,8 @@ export async function importVouchers(lstVoucher: any[], targetCompany?: string):
 export async function deleteMasters(targetCollection: string, lstMaster: string[], targetCompany?: string): Promise<m.CreateUpdateDeleteStatus> {
     try {
         let objTemplateArgs = new Map<string, any>();
-        objTemplateArgs.set('targetCollection', targetCollection);
+        const objCollection = lstCollectionFields.find(c => c.collection == targetCollection);
+        objTemplateArgs.set('targetCollection', objCollection?.tallyType || targetCollection); //an employee is deleted as the cost centre Tally stores it as
         objTemplateArgs.set('masters', lstMaster);
         if (targetCompany) {
             objTemplateArgs.set('targetCompany', targetCompany);

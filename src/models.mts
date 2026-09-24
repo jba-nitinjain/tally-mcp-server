@@ -42,6 +42,8 @@ export interface TallyCollectionDefinition {
     collection: string;
     description?: string;
     fields: TallyFieldDefinition[];
+    tallyType?: string; //object type Tally actually stores the records under, when it differs from the collection name
+    tallyFilter?: string; //TDL condition picking this collection's records out of tallyType
 }
 
 export interface TallyActionVariableDefinition {

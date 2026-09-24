@@ -226,6 +226,8 @@ export const lstCollectionFields = [
     {
         collection: 'Employee',
         description: 'payroll employee, internally stored by Tally as a cost centre flagged for payroll',
+        tallyType: 'CostCentre', //object type Employee is unknown to TallyPrime 2.1 and pops a modal "Could not find description" which freezes Tally
+        tallyFilter: '$ForPayroll',
         fields: [
             { name: 'Name', datatype: 'string' },
             { name: 'Parent', datatype: 'string', expression: 'if $$IsEqual:$Parent:$$SysName:Primary then "" else $Parent', description: 'employee group under which employee is nested' },
