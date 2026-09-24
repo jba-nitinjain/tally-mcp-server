@@ -64,11 +64,18 @@ export function requestPeriod(body) {
     };
 }
 
-/** a ledger-account answer: vouchers, then the synthetic Opening and Closing lines, as Tally emits them */
-export function ledgerAccountXml(vouchers, opening, closing, fromDate, toDate) {
+/** a ledger-account answer: vouchers, then the synthetic Opening and Closing lines, as Tally emits them.
+ *  nature sets the primary group and $IsRevenue carried on the Closing line (isRevenue omitted = tag absent) */
+export function ledgerAccountXml(vouchers, opening, closing, fromDate, toDate, nature = {}) {
+    const { primaryGroup = 'Indirect Expenses', isRevenue } = nature;
     const d = (iso) => { const [y, m, dd] = iso.split('-'); return `${parseInt(dd)}-${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][parseInt(m) - 1]}-${y}`; };
     const rows = vouchers.map((v) => `<ROW><GUID>${v.guid}</GUID><DATE>${d(v.date)}</DATE><VOUCHER_TYPE>Journal</VOUCHER_TYPE><VOUCHER_NUMBER>${v.number}</VOUCHER_NUMBER><ALTERNATE_LEDGER>Bank</ALTERNATE_LEDGER><PARTY_LEDGER></PARTY_LEDGER><AMOUNT>${v.amount}</AMOUNT><NARRATION>monthly charge</NARRATION></ROW>`).join('');
-    return `<DATA>${rows}<ROW><DATE>${d(fromDate)}</DATE><VOUCHER_TYPE>Opening</VOUCHER_TYPE><AMOUNT>${opening}</AMOUNT></ROW><ROW><DATE>${d(toDate)}</DATE><VOUCHER_TYPE>Closing</VOUCHER_TYPE><AMOUNT>${closing}</AMOUNT><PRIMARY_GROUP>Indirect Expenses</PRIMARY_GROUP><IS_INTEGRATED>Yes</IS_INTEGRATED></ROW></DATA>`;
+    return `<DATA>${rows}<ROW><DATE>${d(fromDate)}</DATE><VOUCHER_TYPE>Opening</VOUCHER_TYPE><AMOUNT>${opening}</AMOUNT></ROW><ROW><DATE>${d(toDate)}</DATE><VOUCHER_TYPE>Closing</VOUCHER_TYPE><AMOUNT>${closing}</AMOUNT><PRIMARY_GROUP>${primaryGroup}</PRIMARY_GROUP><IS_INTEGRATED>Yes</IS_INTEGRATED>${isRevenue === undefined ? '' : `<IS_REVENUE>${isRevenue}</IS_REVENUE>`}</ROW></DATA>`;
+}
+
+/** true for the whole-period balance request (ledger-period-balance), which carries no voucher collection */
+export function isPeriodBalanceRequest(body) {
+    return !body.includes('<TYPE>Voucher</TYPE>');
 }
 
 /** the answer to the Company collection query used by probes and server-info */

@@ -20,12 +20,12 @@ Running several Tally Prime instances at once (say different versions or differe
 
 ## Download
 Avoid cloning repository directly. Utility is available for download (with required dependencies) on below link <br>
-[https://excelkida.com/resource/tally-mcp-server-v7.9.0.zip](https://excelkida.com/resource/tally-mcp-server-v7.9.0.zip)
+[https://excelkida.com/resource/tally-mcp-server-v7.9.1.zip](https://excelkida.com/resource/tally-mcp-server-v7.9.1.zip)
 
 One-click installer **extension** for **Claude Desktop**<br>
 [https://excelkida.com/resource/tally-mcp-server-v7.9.0.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.9.0.mcpb)
 
-Last updated: version **7.9.0** [24/09/2026]
+Last updated: version **7.9.1** [24/09/2026]
 
 Refer docs/CHANGELOG.md for details
 
@@ -411,7 +411,7 @@ JSON: `{ "tableID": "...", "rowCount": n, "company": "..." }` (the table also ca
 1. `amount` (number) [**negative** = Debit / **positive** = Credit]
 1. `narration`
 
-A period longer than three months is fetched one calendar month at a time and joined into one statement; the response then also carries `chunked`, `chunkCount`, `chunkContinuity` and `chunks` (per-month balances). When Tally does not deliver in time the tool returns an error object instead of an empty statement:
+A period longer than three months is fetched one calendar month at a time and joined into one statement; the response then also carries `chunked`, `chunkCount`, `ledgerNature`, `chunkContinuity` and `chunks` (per-month balances). A Balance Sheet ledger's months must chain (each month's closing equals the next month's opening). A Profit & Loss ledger is restarted at 0 by Tally for every period after the start of the financial year, so its months are added up as a running sum instead (`chunkContinuity` = `not_applicable_nominal`, closing = first month's opening + every voucher) and checked once against Tally's own closing for the whole period (`runningClosingBalance`, `wholePeriodClosingBalance`, `wholePeriodCheck` = matched / mismatch / not_done). When Tally does not deliver in time the tool returns an error object instead of an empty statement:
 `{ "code": "TALLY_TIMEOUT", "reason": "timeout", "elapsedMs": 45012, "period": { "fromDate": "2025-04-01", "toDate": "2026-03-31" }, "hint": "split the period", "suggestedPeriods": [...], "message": "..." }`. `reason` is one of timeout, connect-timeout, reset, aborted, empty-response, truncated-response. Every other report tool answers a Tally transport failure with the same object
 
 ### stock-item-account

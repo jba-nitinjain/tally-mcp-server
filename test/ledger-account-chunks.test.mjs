@@ -10,7 +10,8 @@ const { setTallyConnection } = await import('../dist/connection.mjs');
 const { fetchLedgerAccount } = await import('../dist/ledgeraccount.mjs');
 const { splitByMonth, isLongerThanMonths } = await import('../dist/period.mjs');
 
-// an expense ledger with one journal of 1,000 on the 15th of every month, opening 0 on 01/04/2025
+// a Balance Sheet ledger (a provision for expenses) with one journal of 1,000 on the 15th of every month,
+// opening 0 on 01/04/2025; its balance carries forward, so the months chain (a P&L ledger: ledger-account-nominal)
 const monthIndex = (iso) => { const [y, m] = iso.split('-').map(Number); return (y - 2025) * 12 + m - 4; };
 let delayMs = 0;
 let tally;
@@ -23,13 +24,13 @@ before(async () => {
             const y = 2025 + Math.floor((i + 3) / 12), mo = ((i + 3) % 12) + 1;
             vouchers.push({ guid: `g-${i}`, number: String(i + 1), date: `${y}-${String(mo).padStart(2, '0')}-15`, amount: '-1000.00' });
         }
-        reply(res, ledgerAccountXml(vouchers, -1000 * first, -1000 * (last + 1), fromDate, toDate), delayMs);
+        reply(res, ledgerAccountXml(vouchers, -1000 * first, -1000 * (last + 1), fromDate, toDate, { primaryGroup: 'Current Liabilities', isRevenue: 'No' }), delayMs);
     });
     setTallyConnection(tally.port, '127.0.0.1');
 });
 after(async () => { await tally.close(); });
 
-const params = (fromDate, toDate, ledgerName = 'Office Expenses') => new Map([['fromDate', fromDate], ['toDate', toDate], ['ledgerName', ledgerName], ['targetCompany', 'Demo Co']]);
+const params = (fromDate, toDate, ledgerName = 'Provision for Expenses') => new Map([['fromDate', fromDate], ['toDate', toDate], ['ledgerName', ledgerName], ['targetCompany', 'Demo Co']]);
 
 test('periods up to three months are one request, longer ones split into calendar months', () => {
     assert.equal(isLongerThanMonths('2025-04-01', '2025-06-30', 3), false);
@@ -57,6 +58,8 @@ test('a full-year ledger-account is fetched as 12 months and joined into one rec
     assert.equal(result.summary.chunked, true);
     assert.equal(result.summary.chunkCount, 12);
     assert.equal(result.summary.chunkContinuity, true);
+    assert.equal(result.summary.ledgerNature, 'real');
+    assert.equal(result.summary.wholePeriodCheck, undefined); // no whole-period request for a Balance Sheet ledger
 });
 
 test('a quarter is a single request, as before', async () => {

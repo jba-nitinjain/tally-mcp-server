@@ -2,6 +2,7 @@ import { fetchReport } from './report.mjs';
 import { tallyTimeoutMs } from './tally.mjs';
 import { TallyTransportError, toTimeoutDetail } from './tallyerror.mjs';
 import { assembleLedgerAccount } from './ledgerstatement.mjs';
+import { joinChained, joinRunningSum, natureOfChunks } from './ledgerchain.mjs';
 import { displayDate, groupRanges, isLongerThanMonths, splitByMonth } from './period.mjs';
 // ---------------------------------------------------------------------------
 // ledger-account over long periods (feedback #56)
@@ -9,9 +10,9 @@ import { displayDate, groupRanges, isLongerThanMonths, splitByMonth } from './pe
 // A full-year statement of a busy ledger could need longer than Tally is given, and the timeout was
 // then reported as "no rows". A period longer than three months is now fetched one calendar month
 // at a time, all months sharing one budget (TALLY_TIMEOUT_MS) so the tool still answers before the
-// Claude relay gives up at 60s. The months are joined into one statement: the first month's Opening
-// row, every voucher, the last month's Closing row; each month must reconcile on its own and its
-// closing must equal the next month's opening. When the budget runs out part way, the result is a
+// Claude relay gives up at 60s. The months are joined into one statement (ledgerchain.mts): a Balance
+// Sheet ledger's months must chain, a Profit & Loss ledger's are added up as a running sum and checked
+// once against Tally's whole-period closing (feedback #59). When the budget runs out part way, the result is a
 // TALLY_TIMEOUT error naming the months retrieved and suggesting shorter periods, never a partial
 // statement and never "no rows"
 // ---------------------------------------------------------------------------
@@ -43,37 +44,26 @@ export async function fetchLedgerAccount(inputParams, fetcher = fetchReport) {
         const statement = assembleLedgerAccount(Array.isArray(resp.data) ? resp.data : []);
         lstDone.push({ range, rows: statement.rows, summary: statement.summary });
     }
-    return joinChunks(lstDone);
+    // feedback #59: a Profit & Loss ledger restarts at 0 every month, so its months are added up, not chained
+    const nature = natureOfChunks(lstDone);
+    const joined = nature === 'nominal'
+        ? joinRunningSum(lstDone, await fetchWholePeriodBalance(inputParams, fetcher, deadline))
+        : joinChained(lstDone, nature);
+    return { ok: true, rows: joined.rows, summary: joined.summary };
 }
-function joinChunks(lstDone) {
-    const isSynthetic = (r, type) => r && !r.guid && r.voucher_type === type;
-    const first = lstDone[0].rows;
-    const last = lstDone[lstDone.length - 1].rows;
-    const opening = first.find(r => isSynthetic(r, 'Opening'));
-    const closing = last.find(r => isSynthetic(r, 'Closing'));
-    const vouchers = lstDone.flatMap(d => d.rows.filter(r => !isSynthetic(r, 'Opening') && !isSynthetic(r, 'Closing')));
-    const merged = [...(opening ? [opening] : []), ...vouchers, ...(closing ? [closing] : [])];
-    const statement = assembleLedgerAccount(merged);
-    const chunks = lstDone.map(d => ({
-        ...d.range,
-        voucherCount: d.summary.voucherCount,
-        openingBalance: d.summary.openingBalance,
-        closingBalance: d.summary.closingBalance,
-        reconciled: d.summary.reconciled
-    }));
-    const lstBreak = chunks.slice(1)
-        .filter((c, i) => Math.abs(c.openingBalance - chunks[i].closingBalance) > 0.01)
-        .map(c => displayDate(c.fromDate));
-    const lstUnreconciled = chunks.filter(c => !c.reconciled).map(c => `${displayDate(c.fromDate)} to ${displayDate(c.toDate)}`);
-    const summary = { ...statement.summary, chunked: true, chunkCount: chunks.length, chunkContinuity: lstBreak.length === 0, chunks };
-    if (lstBreak.length > 0 || lstUnreconciled.length > 0) {
-        summary.reconciled = false;
-        summary.note = [statement.summary.note,
-            lstBreak.length > 0 ? `The opening balance of the month(s) starting ${lstBreak.join(', ')} does not equal the closing balance of the month before, so the months do not chain` : '',
-            lstUnreconciled.length > 0 ? `Month(s) ${lstUnreconciled.join('; ')} do not reconcile on their own (opening + vouchers differs from closing)` : ''
-        ].filter(Boolean).join('. ');
-    }
-    return { ok: true, rows: statement.rows, summary };
+/** the closing Tally reports for the whole period, fetched without vouchers, within what is left of the budget */
+async function fetchWholePeriodBalance(inputParams, fetcher, deadline) {
+    if (Date.now() >= deadline - 250)
+        return { notDone: 'the time allowed for this call had run out' };
+    const resp = await fetcher('ledger-period-balance', inputParams, { deadline });
+    if (resp.errorDetail)
+        return { notDone: 'Tally did not answer within the time allowed' };
+    if (resp.error)
+        return { notDone: `Tally answered ${resp.error}` };
+    const closing = (Array.isArray(resp.data) ? resp.data : []).find(r => r && !r.guid && r.voucher_type === 'Closing');
+    if (!closing || typeof closing.amount !== 'number' || isNaN(closing.amount))
+        return { notDone: 'Tally did not return a closing balance for the whole period' };
+    return { closing: closing.amount };
 }
 function chunkTimeout(detail, period, failed, lstChunk, lstDone, elapsedMs) {
     const remaining = lstChunk.filter(c => c.fromDate >= failed.fromDate);

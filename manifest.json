@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "tally-mcp-server",
   "display_name": "Tally Prime",
-  "version": "7.9.0",
+  "version": "7.9.1",
   "description": "Expose Tally Prime ERP data to MCP-compatible clients like Claude Desktop.",
   "author": {
     "name": "Dhananjay Gokhale",
@@ -125,7 +125,7 @@
     },
     {
       "name": "ledger-account",
-      "description": "fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). a period longer than three months is fetched one calendar month at a time and joined, with each month reconciled and chained to the next. when Tally does not deliver in time the call returns an error object with code TALLY_TIMEOUT, elapsedMs, period and hint split the period (plus suggestedPeriods), never an empty statement. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
+      "description": "fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). a period longer than three months is fetched one calendar month at a time and joined, each month reconciled on its own; a Balance Sheet ledger's months are chained, a Profit & Loss ledger's are added up as a running sum (chunkContinuity not_applicable_nominal) and checked against Tally's whole-period closing (wholePeriodCheck). when Tally does not deliver in time the call returns an error object with code TALLY_TIMEOUT, elapsedMs, period and hint split the period (plus suggestedPeriods), never an empty statement. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused with the list of open companies, and the response echoes the company the data was served from in a company property"
     },
     {
       "name": "stock-item-account",

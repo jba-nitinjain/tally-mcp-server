@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { deleteMasters, deleteVouchers, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, scanTallyInstances, setTallyConnection } from './tally.mjs';
 import { fetchReport } from './report.mjs';
 import { fetchLedgerAccount } from './ledgeraccount.mjs';
+import { resolveBsPl } from './ledgernature.mjs';
 import { connectionStateFile, isConnectionPersisted } from './connection.mjs';
 import { isTallyTimeout, toTimeoutDetail } from './tallyerror.mjs';
 import { cacheTable, executeSQL } from './database.mjs';
@@ -225,27 +226,7 @@ function parseInputDate(value) {
 function roundAmount(value) {
     return Math.round((value + Number.EPSILON) * 100) / 100;
 }
-/**
- * Feedback #33: bs_pl on chart-of-accounts is the Profit & Loss (true) / Balance Sheet (false) nature of a ledger.
- * Approach chosen: Tally's own $IsRevenue on the ledger is used first. Tally fixes that flag on the 28 reserved
- * primary groups and inherits it down every sub-group to the ledger, so it is by construction the PRIMARY group's
- * nature and survives user-renamed sub-groups (the profit-and-loss / balance-sheet tools filter on the same flag,
- * so the three tools stay consistent). The value was constant false only because the TDL answers 1 / 0 and the
- * parser accepted "Yes" alone; that coercion is now shared (parseTallyBoolean in tally.mts).
- * Fallback: when Tally answers blank for a ledger, the nature is derived from the primary group name using the
- * six revenue primaries (Sales Accounts, Purchase Accounts, Direct Incomes, Direct Expenses, Indirect Incomes,
- * Indirect Expenses -> true, every other primary -> false). When the primary group is blank too the row keeps
- * null so the caller sees the gap instead of a silent false
- */
-const lstProfitLossPrimaryGroup = ['sales accounts', 'purchase accounts', 'direct incomes', 'direct expenses', 'indirect incomes', 'indirect expenses'];
-function resolveBsPl(isRevenue, primaryGroup) {
-    if (typeof isRevenue === 'boolean')
-        return isRevenue;
-    const groupName = typeof primaryGroup === 'string' ? primaryGroup.trim().toLowerCase() : '';
-    if (!groupName)
-        return null;
-    return lstProfitLossPrimaryGroup.includes(groupName);
-}
+// resolveBsPl (feedback #33) lives in ledgernature.mts, shared with ledger-account (feedback #59)
 /**
  * Fetches books beginning date of the target company (or the active company when not specified),
  * which Tally requires as the applicable from date for mailing / GST details of masters
@@ -948,7 +929,7 @@ export async function registerMcpServer() {
     });
     mcpServer.registerTool('ledger-account', {
         title: 'Ledger Account',
-        description: `fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). the first row is a synthetic "Opening" row (voucher_type Opening, date = fromDate, amount = opening balance) and the last row is a synthetic "Closing" row (voucher_type Closing, date = toDate, amount = closing balance as Tally reports it for the period, the same figure trial-balance gives); both have a blank guid and are not vouchers. the response also carries a reconciliation check: reconciled (true when opening + sum of voucher amounts equals closing within 0.01), unexplainedMovement (closing minus opening minus voucher amounts, positive = credit not covered by the rows returned, negative = debit), openingBalance, closingBalance, voucherCount and, whenever reconciled is false, a note explaining why. reconciled false means the statement is incomplete and must not be read as "no transactions"; for a ledger under primary group Stock-in-Hand the movement is derived from stock values and has no vouchers or narration behind it, so use stock-summary instead. a period longer than three months is fetched one calendar month at a time and joined; the response then also carries chunked, chunkCount, chunkContinuity (each month's closing equals the next month's opening) and chunks (per-month balances and voucherCount). when Tally does not deliver in time the call returns an error object with code TALLY_TIMEOUT, elapsedMs, period, hint "split the period" and suggestedPeriods: call again once for each suggested period, and never read it as no transactions. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the response echoes the company the data was served from in a company property, which should be asserted against the company intended before any figure is used`,
+        description: `fetches GL ledger account statement with voucher level details containing fields guid, date, voucher_type, voucher_number, alternate_ledger, party_name, amount, narration . amount = debit is negative and credit is positive. alternate_ledger = if amount is credit then ledger by which it is debited and vice-a-versa (in case of multiple ledgers first one is displayed). the first row is a synthetic "Opening" row (voucher_type Opening, date = fromDate, amount = opening balance) and the last row is a synthetic "Closing" row (voucher_type Closing, date = toDate, amount = closing balance as Tally reports it for the period, the same figure trial-balance gives); both have a blank guid and are not vouchers. the response also carries a reconciliation check: reconciled (true when opening + sum of voucher amounts equals closing within 0.01), unexplainedMovement (closing minus opening minus voucher amounts, positive = credit not covered by the rows returned, negative = debit), openingBalance, closingBalance, voucherCount and, whenever reconciled is false, a note explaining why. reconciled false means the statement is incomplete and must not be read as "no transactions"; for a ledger under primary group Stock-in-Hand the movement is derived from stock values and has no vouchers or narration behind it, so use stock-summary instead. a period longer than three months is fetched one calendar month at a time and joined; the response then also carries chunked, chunkCount, ledgerNature (nominal = Profit & Loss, real = Balance Sheet, unknown), chunkContinuity and chunks (per-month balances and voucherCount). a Balance Sheet ledger's months must chain (chunkContinuity true when each month's closing equals the next month's opening). a Profit & Loss ledger restarts at 0 for every period after the financial year start, so its months are added up as a running sum instead (chunkContinuity 'not_applicable_nominal', closingBalance = first month's opening + every voucher) and checked once against Tally's own closing for the whole period: runningClosingBalance, wholePeriodClosingBalance and wholePeriodCheck (matched, mismatch, or not_done when that check did not fit in the time allowed, in which case reconciled rests on each month reconciling on its own). when Tally does not deliver in time the call returns an error object with code TALLY_TIMEOUT, elapsedMs, period, hint "split the period" and suggestedPeriods: call again once for each suggested period, and never read it as no transactions. returns output cached in pglite postgres in-memory table (specified in tableID property). Use query-database tool to run SQL queries against that table for further analysis. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the response echoes the company the data was served from in a company property, which should be asserted against the company intended before any figure is used`,
         inputSchema: {
             targetCompany: targetCompanySchema,
             ledgerName: z.string().describe('ledger name, always verify if ledger exists using list-master tool with collection as ledger'),
