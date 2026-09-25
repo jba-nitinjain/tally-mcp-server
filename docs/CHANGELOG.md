@@ -1,5 +1,13 @@
 # Release History
 
+### Version: v7.9.2 [25/09/2026]
+
+Fixed:
+* **TallyPrime 2.1 still froze with the pop-up *Error in TDL. 'Collection:MyCollection' Could not find description!* after v7.8.1.** Two more requests carried TDL which TallyPrime 2.1 rejects; the pop-up is modal, so Tally stopped answering every later request until someone clicked OK. Both were found by running every field of every collection and every read tool against a live TallyPrime 2.1:
+  * **ledger-account** and **stock-item-account** froze Tally on every call. The voucher amount field wrapped its argument in brackets (`$$IsDebit:($AllLedgerEntries[1,@@FilterLedgerEqual].Amount)`) and was named `FldAmount`; the amount is now written without the brackets and the field renamed `FldVchAmount`. The figures returned are unchanged
+  * **query-collection** on StockItem froze Tally whenever `CostingMethod` was asked for, because the field was defined twice in the StockItem collection and so sent to Tally as two definitions of the same name. The duplicate is removed, and a field requested twice is now sent once whatever the collection definition holds
+* Verified against TallyPrime 2.1: all 17 collections field by field, and server-info, list-master, chart-of-accounts, trial-balance, profit-loss, balance-sheet, stock-summary, ledger-balance, stock-item-balance, bills-outstanding, ledger-account (Balance Sheet and Profit & Loss ledgers), stock-item-account and query-collection
+
 ### Version: v7.9.1 [24/09/2026]
 
 Fixed:

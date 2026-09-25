@@ -30,7 +30,7 @@
                         <SCROLLED>Vertical</SCROLLED>
                     </PART>
                     <LINE NAME="MyLine01">
-                        <FIELDS>FldDate,FldVoucherType,FldVoucherNumber,FldPartyLedger,FldQuantity,FldAmount,FldNarration,FldTrackingNumber,FldVoucherTypeParent</FIELDS>
+                        <FIELDS>FldDate,FldVoucherType,FldVoucherNumber,FldPartyLedger,FldQuantity,FldVchAmount,FldNarration,FldTrackingNumber,FldVoucherTypeParent</FIELDS>
                         <XMLTAG>ROW</XMLTAG>
                     </LINE>
                     <LINE NAME="MyLineOp">
@@ -57,8 +57,8 @@
                         <SET>if $$IsInwards:$AllInventoryEntries[1,@@FilterItemEqual].BilledQty then $$Number:$AllInventoryEntries[1,@@FilterItemEqual].BilledQty else -$$Number:$AllInventoryEntries[1,@@FilterItemEqual].BilledQty</SET>
                         <XMLTAG>quantity</XMLTAG>
                     </FIELD>
-                    <FIELD NAME="FldAmount">
-                        <SET>if $$IsDebit:($AllInventoryEntries[1,@@FilterItemEqual].Amount) then -$$NumValue:$AllInventoryEntries[1,@@FilterItemEqual].Amount else $$NumValue:$AllInventoryEntries[1,@@FilterItemEqual].Amount</SET>
+                    <FIELD NAME="FldVchAmount">
+                        <SET>if $$IsDebit:$AllInventoryEntries[1,@@FilterItemEqual].Amount then -$$NumValue:$AllInventoryEntries[1,@@FilterItemEqual].Amount else $$NumValue:$AllInventoryEntries[1,@@FilterItemEqual].Amount</SET>
                         <XMLTAG>amount</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldNarration">

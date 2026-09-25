@@ -30,7 +30,7 @@
                         <SCROLLED>Vertical</SCROLLED>
                     </PART>
                     <LINE NAME="MyLine01">
-                        <FIELDS>FldGuid,FldDate,FldVoucherType,FldVoucherNumber,FldAlternateLedger,FldPartyLedger,FldAmount,FldNarration</FIELDS>
+                        <FIELDS>FldGuid,FldDate,FldVoucherType,FldVoucherNumber,FldAlternateLedger,FldPartyLedger,FldVchAmount,FldNarration</FIELDS>
                         <XMLTAG>ROW</XMLTAG>
                     </LINE>
                     <LINE NAME="MyLineOp">
@@ -65,8 +65,8 @@
                         <SET>$PartyLedgerName</SET>
                         <XMLTAG>party_ledger</XMLTAG>
                     </FIELD>
-                    <FIELD NAME="FldAmount">
-                        <SET>if $$IsDebit:($AllLedgerEntries[1,@@FilterLedgerEqual].Amount) then -$$NumValue:$AllLedgerEntries[1,@@FilterLedgerEqual].Amount else $$NumValue:$AllLedgerEntries[1,@@FilterLedgerEqual].Amount</SET>
+                    <FIELD NAME="FldVchAmount">
+                        <SET>if $$IsDebit:$AllLedgerEntries[1,@@FilterLedgerEqual].Amount then -$$NumValue:$AllLedgerEntries[1,@@FilterLedgerEqual].Amount else $$NumValue:$AllLedgerEntries[1,@@FilterLedgerEqual].Amount</SET>
                         <XMLTAG>amount</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldNarration">

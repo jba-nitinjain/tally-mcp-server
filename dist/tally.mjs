@@ -127,7 +127,7 @@ async function runCollectionQuery(targetCollection, lstFields, lstFilters, targe
             objTemplateArgs.set('toDate', toDate);
         let objCollection = lstCollectionFields.filter(c => c.collection == targetCollection)[0]; //load collection definition
         objTemplateArgs.set('collection', objCollection.tallyType || targetCollection);
-        let lstQueryFields = objCollection.fields.filter(f => lstFields.includes(f.name)); //filter fields based on user query
+        let lstQueryFields = objCollection.fields.filter((f, i, all) => lstFields.includes(f.name) && all.findIndex(o => o.name == f.name) == i); //filter fields based on user query, each field once: a field defined twice in the TDL makes TallyPrime 2.1 pop a modal "Could not find description" which freezes it
         objTemplateArgs.set('fields', lstQueryFields); //filter fields queried by user
         if (objCollection.tallyFilter || (lstFilters && lstFilters.size > 0)) {
             let objFilters = [];
