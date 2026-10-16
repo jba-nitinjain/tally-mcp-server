@@ -85,7 +85,8 @@ test('when the months do not all fit in the budget the answer is TALLY_TIMEOUT w
 });
 
 test('ledger names with an apostrophe or a double quote reach Tally as valid XML and valid TDL', async () => {
-    for (const [name, tdl] of [["Director's Remuneration", `"Director's Remuneration"`], ['12" Pipes & Fittings', `"12"" Pipes & Fittings"`]]) {
+    for (const [name, tdl] of [["Director's Remuneration", `"Director's Remuneration"`], ['12" Pipes & Fittings', `("12" + $$StrByCharCode:34 + " Pipes & Fittings")`], ['24"WF Aircirculator', `("24" + $$StrByCharCode:34 + "WF Aircirculator")`]]) {
+        // a doubled quote ("") is "Bad formula!" on TallyPrime 6.1: the quote is built with $$StrByCharCode:34
         tally.requests.length = 0;
         await fetchLedgerAccount(params('2025-04-01', '2025-04-30', name));
         const body = tally.requests[0];

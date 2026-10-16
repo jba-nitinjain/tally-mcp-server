@@ -20,12 +20,12 @@ Running several Tally Prime instances at once (say different versions or differe
 
 ## Download
 Avoid cloning repository directly. Utility is available for download (with required dependencies) on below link <br>
-[https://excelkida.com/resource/tally-mcp-server-v7.9.2.zip](https://excelkida.com/resource/tally-mcp-server-v7.9.2.zip)
+[https://excelkida.com/resource/tally-mcp-server-v7.9.7.zip](https://excelkida.com/resource/tally-mcp-server-v7.9.7.zip)
 
 One-click installer **extension** for **Claude Desktop**<br>
-[https://excelkida.com/resource/tally-mcp-server-v7.9.2.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.9.2.mcpb)
+[https://excelkida.com/resource/tally-mcp-server-v7.9.7.mcpb](https://excelkida.com/resource/tally-mcp-server-v7.9.7.mcpb)
 
-Last updated: version **7.9.2** [25/09/2026]
+Last updated: version **7.9.7** [16/10/2026]
 
 Refer docs/CHANGELOG.md for details
 
@@ -613,7 +613,7 @@ Sign convention followed across the whole tool is **debit is negative and credit
 Every object of `vouchers` supports:
 |Property|Description|
 |--|--|
-|guid (optional)|Guid of an existing voucher to update it (available in the output of `ledger-account`). Skip it to create a new voucher. On update the voucher is fully replaced by the supplied content|
+|guid (optional)|Guid of an existing voucher to update it (available in the output of `ledger-account`, or in the `vouchers` array returned when the voucher was created). Skip it to create a new voucher. On update the voucher is fully replaced by the supplied content. A guid which names no voucher of `targetCompany` is refused before anything is posted. Tally finds the voucher to change by its current date, voucher type and number, read from Tally just before it is posted: it keeps its number unless `voucherNumber` is given (when the date changes on a voucher type numbered automatically, Tally gives it the next number of the new date, and the number it holds is returned), its voucher type cannot be changed, a voucher whose number another voucher of its type shares on that date (or which has no number) is refused, and every change is read back afterwards (`confirmed`)|
 |date|Voucher date in YYYY-MM-DD|
 |voucherType|Voucher type name. Validate it using `list-master` with collection as `vouchertype`|
 |voucherNumber (optional)|Skip it to let Tally auto-number the voucher|
@@ -647,19 +647,21 @@ Every object of `inventoryEntries` supports:
 |accountingLedger (optional)|Sales / purchase / stock adjustment ledger to which the value is posted. Mandatory for an invoice like Sales or Purchase|
 
 **Output**
-JSON result returned by import operation (count of created / altered records) with the `company` written to.
+JSON result with the count of `created` and `altered` vouchers, the `company` written to, and a `vouchers` array holding, for every voucher in the order supplied, `action` (`created` or `altered`), `guid`, `date`, `voucherType` and `voucherNumber`; an altered voucher also has `confirmed` (true when Tally was read back and holds the change) and, where relevant, `note` or `warning`. The call is an error when any voucher has a `warning` or is not confirmed. The guid of a created voucher is read back from Tally by its master id, so the voucher can be altered or deleted later. Vouchers are posted one at a time; when one is rejected, the error lists the vouchers saved before it.
 
 ### voucher-delete
 Delete one (or more) vouchers from Tally permanently. This operation cannot be undone.
+
+Every voucher is looked up in Tally before anything is deleted: by the number at the end of its guid (wherever it is dated), or else on the date given. It is then deleted by its date, voucher type and voucher number, read again just before each deletion because Tally renumbers the later vouchers of a type as soon as one is deleted. A voucher whose number another voucher of the same type shares on that date (an optional voucher takes the number of the regular one beside it), or which has no number, is not deleted (`status` failed; delete it on the Tally screen); a voucher with no number but an id from another program is deleted through that id when no other voucher carries it. A guid which names no voucher of `targetCompany`, a date, voucher type or number which does not match what Tally holds for that guid, or a number which matches more than one voucher refuses the whole call, with nothing deleted. Vouchers are deleted one at a time and each is checked afterwards.
 
 **Input**
 |Argument|Description|
 |--|--|
 |targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`. A call without it, or naming a company not open in Tally, is refused with the list of open companies|
-|vouchers|Array of objects containing `guid`, `date`, `voucherType` and optional `voucherNumber`. All of these are available in the output of `ledger-account` tool|
+|vouchers|Array of objects. Each holds a `guid` (from the output of `ledger-account`, or from the `vouchers` array returned by `voucher-create-update`), or, when no guid is at hand, its `date`, `voucherType` and `voucherNumber` together. With a guid the other three are optional and only cross-checked against Tally. `date` is YYYY-MM-DD (DD/MM/YYYY is also accepted)|
 
 **Output**
-JSON result returned by delete operation (count of deleted records) with the `company` written to.
+JSON result with the counts `deleted`, `failed`, `unknown` and `notAttempted`, the `company` written to, and a `vouchers` array holding, for every voucher in the order supplied, `status` (`deleted`, `failed`, `unknown` or `not_attempted`), `guid`, `date` (YYYY-MM-DD), `voucherType`, `voucherNumber`, `confirmed` (true when Tally was checked afterwards and the voucher is gone) and, where relevant, `error` or `note` (for example that Tally had renumbered the voucher after an earlier deletion). The lookups and the deletions share the 45 second budget of a call; vouchers which do not fit are returned as `not_attempted` and can be sent again in a new call. The call is an error when any voucher is not `deleted`.
 
 ### company-create-update
 Create a new company, or update details of an existing one.

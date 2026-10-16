@@ -115,6 +115,19 @@ class _utility {
          */
         nameKey(value) {
             return this.normaliseName(value).replace(/\s+/g, ' ').toLowerCase();
+        },
+        /**
+         * Builds a TDL expression yielding the given text, for placing a name inside a formula.
+         * TDL string literals have no escape for a double quote: a doubled quote ("") is rejected by
+         * TallyPrime 6.1 as "Bad formula!" (feedback: 24"WF Aircirculator). A name carrying a quote is
+         * therefore emitted as a parenthesised concatenation with $$StrByCharCode:34 supplying each quote
+         * @param value {string} Text (already normalised)
+         * @returns {string} TDL expression, e.g. "Cash" or ("24" + $$StrByCharCode:34 + "WF")
+         */
+        tdlLiteral(value) {
+            if (!value.includes('"'))
+                return `"${value}"`;
+            return '(' + value.split('"').map(part => `"${part}"`).join(' + $$StrByCharCode:34 + ') + ')';
         }
     };
     Number = {

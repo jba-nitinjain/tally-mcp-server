@@ -42,7 +42,7 @@
             <REQUESTDATA>
                 {% for voucher in vouchers %}
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
-                    <VOUCHER {% if voucher.guid %}REMOTEID="{{ voucher.guid | escape }}" VCHKEY="" {% endif %}VCHTYPE="{{ voucher.voucherType | escape }}" ACTION="{{ "Alter" if voucher.guid else "Create" }}" OBJVIEW="{{ voucher.objectView | escape }}">
+                    <VOUCHER {% if voucher.target %}{% if voucher.target.kind == "number" %}DATE="{{ voucher.target.date | formatDate("d-MMM-yyyy") }}" TAGNAME="Voucher Number" TAGVALUE="{{ voucher.target.voucherNumber | escape }}" {% else %}REMOTEID="{{ voucher.target.remoteId | escape }}" VCHKEY="" {% endif %}{% endif %}VCHTYPE="{{ voucher.voucherType | escape }}" ACTION="{{ "Alter" if voucher.target else "Create" }}" OBJVIEW="{{ voucher.objectView | escape }}">
                         <DATE>{{ voucher.date | formatDate("yyyyMMdd") }}</DATE>
                         <EFFECTIVEDATE>{{ voucher.date | formatDate("yyyyMMdd") }}</EFFECTIVEDATE>
                         <VOUCHERTYPENAME>{{ voucher.voucherType | escape }}</VOUCHERTYPENAME>

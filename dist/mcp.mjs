@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import { deleteMasters, deleteVouchers, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, scanTallyInstances, setTallyConnection } from './tally.mjs';
+import { deleteMasters, deleteVouchers, findVoucherByMasterId, findVouchersByKey, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, scanTallyInstances, setTallyConnection, tallyTimeoutMs } from './tally.mjs';
 import { fetchReport } from './report.mjs';
 import { fetchLedgerAccount } from './ledgeraccount.mjs';
 import { resolveBsPl } from './ledgernature.mjs';
@@ -167,10 +167,10 @@ function periodOf(args) {
     return fromDate || toDate ? { fromDate, toDate } : null;
 }
 /**
- * Builds a TDL string literal for a name: double quotes are doubled, as TDL expects
+ * Builds a TDL expression for a name, quotes included (see utility.String.tdlLiteral)
  */
 function tdlString(value) {
-    return value.replace(/"/g, '""');
+    return utility.String.tdlLiteral(value);
 }
 /**
  * Resolves a single master name supplied by a caller (ledgerName, itemName ...) to the name Tally holds.
@@ -186,7 +186,7 @@ async function resolveLookupName(collection, name, targetCompany) {
     if (targetName === '')
         throw new Error(`No ${label} name was given. Kindly pass the exact name as returned by list-master tool with collection as ${collection.toLowerCase()}`);
     // cheap path first: Tally compares $$IsEqual case-insensitively, so this covers nearly every call
-    const lstExact = await queryCollection(collection, ['Name'], new Map([['Exact_Name', `$$IsEqual:$Name:"${tdlString(targetName)}"`]]), targetCompany);
+    const lstExact = await queryCollection(collection, ['Name'], new Map([['Exact_Name', `$$IsEqual:$Name:${tdlString(targetName)}`]]), targetCompany);
     if (lstExact.length === 1)
         return lstExact[0].Name;
     // tolerant path: fetch every name once and match after normalisation
@@ -268,6 +268,198 @@ async function resolveMasterNames(collection, lstName, targetCompany) {
     if (lstMissingName.length > 0)
         throw new Error(`Following ${collection} master(s) do not exist in Tally: ${lstMissingName.join(', ')}. Kindly validate them using list-master tool and create them before retrying`);
     return lstResolvedName;
+}
+const missingVoucherAdvice = 'A guid must never be built or guessed, for example by counting on from other guids: take it from the guid column of ledger-account, or from the vouchers array returned by voucher-create-update when the voucher was created. The voucher may also have been deleted, or it may belong to another company';
+/**
+ * Parses a voucher date given as YYYY-MM-DD, or day first as DD/MM/YYYY (also with dashes), which is how the
+ * user reads dates. Returns null for anything else, including a date which does not exist (31/02/2025)
+ */
+function parseVoucherDateInput(value) {
+    const text = value.trim();
+    let year, month, day;
+    let match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+    if (match) {
+        [year, month, day] = [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])];
+    }
+    else if ((match = /^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/.exec(text))) {
+        [day, month, year] = [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])];
+    }
+    else {
+        return null;
+    }
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
+}
+function isoDate(date) {
+    return utility.Date.format(date, 'yyyy-MM-dd');
+}
+/** the lookups did not finish inside the share of the call budget set aside for them */
+class VoucherLookupBudgetError extends Error {
+    confirmed;
+    total;
+    elapsedMs;
+    constructor(confirmed, total, elapsedMs) {
+        super('lookup budget exhausted');
+        this.confirmed = confirmed;
+        this.total = total;
+        this.elapsedMs = elapsedMs;
+    }
+}
+/**
+ * Looks up every voucher to be deleted or altered in Tally, before anything is posted, so that a call is
+ * all or nothing as far as the identification goes. Tally takes an Alter whose key it cannot find as a new
+ * voucher and creates it, so a made-up guid would add a duplicate instead of correcting anything. What is
+ * posted later is keyed by date, type and number (see chooseImportTarget), never by the guid.
+ * A guid Tally gave out ends in the voucher's master id in hex, and a voucher is fetched by master id at once
+ * wherever it is dated. A Data report is bound to a period, and searching the whole books that way outlasted the
+ * time allowed for a call on a large company, so it is used only on the one date supplied, for a guid which does
+ * not follow Tally's numbering, or for a voucher named by its date, type and number
+ * @param checkFields true when the date, type and number supplied alongside a guid must agree with Tally (delete); an alteration may change them
+ * @param deadline when the lookups must have finished; running past it raises VoucherLookupBudgetError
+ */
+async function resolveVoucherTargets(lstRequest, company, deadline, checkFields) {
+    const resolved = [];
+    const problems = [];
+    const started = Date.now();
+    const lstSeenMasterId = new Set();
+    // every Tally call is run through here, so that running out of time, or Tally not answering, ends the
+    // lookups with one error which says how far they got
+    const ask = async (call) => {
+        if (Date.now() >= deadline)
+            throw new VoucherLookupBudgetError(resolved.length, lstRequest.length, Date.now() - started);
+        try {
+            return await call();
+        }
+        catch (err) {
+            if (isTallyTimeout(err))
+                throw new VoucherLookupBudgetError(resolved.length, lstRequest.length, Date.now() - started);
+            throw err;
+        }
+    };
+    for (const request of lstRequest) {
+        const label = 'voucher ' + (request.index + 1) + (request.guid ? ' (guid ' + request.guid.trim() + ')' : '');
+        const problem = (kind, message) => problems.push({ index: request.index, guid: request.guid?.trim(), kind, message });
+        const dateText = request.date ? isoDate(request.date) : '';
+        let found;
+        if (request.guid) {
+            const guid = request.guid.trim();
+            const guidKey = guid.toLowerCase();
+            const hexId = /-([0-9a-f]{8})$/i.exec(guid)?.[1];
+            if (hexId) {
+                const byId = await ask(() => findVoucherByMasterId(parseInt(hexId, 16), company, deadline));
+                if (byId && byId.guid.toLowerCase() === guidKey)
+                    found = byId;
+            }
+            if (!found && request.date) {
+                // the id given may be the stored remote id of a voucher, which does not follow Tally's numbering, so either is searched
+                const lstRow = await ask(() => findVouchersByKey(`$Guid = ${tdlString(guid)} OR $RemoteGUID = ${tdlString(guid)}`, company, request.date, deadline)); //compared with = : Tally.ERP 9 returns no rows for $$IsEqual on these methods
+                const byGuid = lstRow.filter((row) => row.guid.toLowerCase() === guidKey);
+                const lstMatch = byGuid.length > 0 ? byGuid : lstRow.filter((row) => (row.remoteGuid || '').toLowerCase() === guidKey);
+                if (lstMatch.length === 1) {
+                    found = lstMatch[0];
+                }
+                else if (lstMatch.length > 1) {
+                    problem('ambiguous', `${label}: ${lstMatch.length} vouchers on ${dateText} answer to this id (guids ${lstMatch.map((row) => row.guid).join(', ')}). Delete it from the Tally screen instead`);
+                    continue;
+                }
+            }
+            if (!found) {
+                if (request.date)
+                    problem('not_found', `${label}: no voucher with this guid exists in company ${company} on ${dateText}. ${missingVoucherAdvice}`);
+                else if (hexId)
+                    problem('not_found', `${label}: no voucher with this guid exists in company ${company}. If it is an id which another program gave the voucher, pass the voucher's date as well, so that it can be searched. ${missingVoucherAdvice}`);
+                else
+                    problem('needs_date', `${label}: this guid does not end in a Tally voucher number, so it can only be searched on the voucher's date. Pass its date as well`);
+                continue;
+            }
+        }
+        else {
+            // named by date, type and number; the handler has made sure all three are there
+            const number = (request.voucherNumber || '').trim();
+            const lstRow = await ask(() => findVouchersByKey(`$VoucherNumber = ${tdlString(number)}`, company, request.date, deadline));
+            const lstMatch = lstRow.filter((row) => utility.String.nameKey(row.voucherType) === utility.String.nameKey(request.voucherType || '')
+                && row.voucherNumber.trim().toLowerCase() === number.toLowerCase()
+                && isoDate(row.date) === dateText);
+            if (lstMatch.length === 0) {
+                problem('not_found', `${label}: no ${request.voucherType} voucher number ${number} dated ${dateText} exists in company ${company}. Check the number, type and date (ledger-account shows them with the guid) and try again`);
+                continue;
+            }
+            if (lstMatch.length > 1) {
+                problem('ambiguous', `${label}: ${lstMatch.length} vouchers match ${request.voucherType} number ${number} dated ${dateText} (guids ${lstMatch.map((row) => row.guid).join(', ')}). Pass the guid of the one meant`);
+                continue;
+            }
+            found = lstMatch[0];
+        }
+        // what was supplied alongside a guid is only a check that the right voucher is meant, and is never corrected from Tally
+        if (checkFields && request.guid) {
+            const lstDiffer = [];
+            if (request.date && isoDate(request.date) !== isoDate(found.date))
+                lstDiffer.push(`date ${dateText}`);
+            if (request.voucherType && utility.String.nameKey(request.voucherType) !== utility.String.nameKey(found.voucherType))
+                lstDiffer.push(`voucherType ${request.voucherType}`);
+            if (request.voucherNumber && request.voucherNumber.trim().toLowerCase() !== found.voucherNumber.trim().toLowerCase())
+                lstDiffer.push(`voucherNumber ${request.voucherNumber}`);
+            if (lstDiffer.length > 0) {
+                problem('mismatch', `${label}: Tally holds this voucher as ${found.voucherType} ${found.voucherNumber || '(no number)'} dated ${isoDate(found.date)}, which does not match the ${lstDiffer.join(', ')} given. Check that this is the voucher the user means; to delete it as Tally holds it, resend with Tally's values or leave date, voucherType and voucherNumber out`);
+                continue;
+            }
+        }
+        if (lstSeenMasterId.has(found.masterId)) {
+            problem('duplicate', `${label}: the same voucher (guid ${found.guid}) is listed more than once`);
+            continue;
+        }
+        lstSeenMasterId.add(found.masterId);
+        resolved.push({ ...found, index: request.index });
+    }
+    return { resolved, problems };
+}
+/** a voucher Tally could not be told to change or delete safely; nothing was sent for it */
+class TargetRefusedError extends Error {
+}
+/**
+ * Decides how an import is to point at an existing voucher, from the voucher as Tally holds it right now.
+ * Tally matches an import's REMOTEID only against the id another program stored with a voucher (REMOTEGUID, empty for
+ * a voucher entered in Tally or created by this connector), never against its guid. The way which works for every
+ * voucher is its date, voucher type and current voucher number, and that is unique only when no other voucher of the
+ * type carries the number on that date (an optional voucher takes the number of the regular one beside it), so such a
+ * voucher is refused. A voucher with no number is reached through its REMOTEGUID, but only when no other voucher has it
+ */
+async function chooseImportTarget(voucher, company, deadline, verb) {
+    const done = verb === 'delete' ? 'deleted' : 'changed';
+    const number = (voucher.voucherNumber || '').trim();
+    const iso = isoDate(voucher.date);
+    if (number !== '') {
+        const lstRow = await findVouchersByKey(`$VoucherNumber = ${tdlString(number)}`, company, voucher.date, deadline);
+        const lstSameDate = lstRow.filter((row) => isoDate(row.date) === iso && row.voucherNumber.trim().toLowerCase() === number.toLowerCase()); //the filter is applied by Tally, the date and number are checked again here
+        const lstSameType = lstSameDate.filter((row) => utility.String.nameKey(row.voucherType) === utility.String.nameKey(voucher.voucherType));
+        if (!lstSameType.some((row) => row.masterId === voucher.masterId))
+            throw new TargetRefusedError(`Tally's list of the vouchers dated ${iso} does not show ${voucher.voucherType} ${number} (guid ${voucher.guid}), so it could not be ${done} safely. Nothing was sent for it; ${verb} it on the Tally screen instead`);
+        if (lstSameType.length > 1)
+            throw new TargetRefusedError(`${lstSameType.length} ${voucher.voucherType} vouchers dated ${iso} carry number ${number} (guids ${lstSameType.map((row) => row.guid).join(', ')}; an optional voucher shares the number of the regular one beside it), and Tally finds the voucher to ${verb} by its date, type and number, so it could not tell them apart. Nothing was sent for it; ${verb} it on the Tally screen instead`);
+        return { target: { kind: 'number', date: voucher.date, voucherType: voucher.voucherType, voucherNumber: number }, lstOther: lstSameDate.filter((row) => row.masterId !== voucher.masterId) };
+    }
+    const remoteGuid = (voucher.remoteGuid || '').trim();
+    if (remoteGuid === '')
+        throw new TargetRefusedError(`voucher ${voucher.guid} has no voucher number, and Tally can only find a voucher to ${verb} by its date, type and number, or by an id another program gave it, which this voucher does not have. Nothing was sent for it; ${verb} it on the Tally screen instead`);
+    // the whole books are searched, since another voucher may carry the same id on any date
+    const booksFrom = await resolveBooksBeginFrom(company);
+    const until = new Date(Math.max(Date.now(), voucher.date.getTime()));
+    const toDate = new Date(until.getFullYear() + 1, 2, 31);
+    const lstRow = await findVouchersByKey(`$RemoteGUID = ${tdlString(remoteGuid)}`, company, booksFrom, deadline, toDate);
+    const lstMatch = lstRow.filter((row) => (row.remoteGuid || '').toLowerCase() === remoteGuid.toLowerCase());
+    if (lstMatch.length !== 1 || lstMatch[0].masterId !== voucher.masterId)
+        throw new TargetRefusedError(`voucher ${voucher.guid} has no voucher number, and the id another program gave it (${remoteGuid}) is carried by ${lstMatch.length} vouchers (guids ${lstMatch.map((row) => row.guid).join(', ') || 'none'}), so Tally could not tell them apart. Nothing was sent for it; ${verb} it on the Tally screen instead`);
+    return { target: { kind: 'remoteId', remoteId: remoteGuid, voucherType: voucher.voucherType }, lstOther: [] };
+}
+/**
+ * Reads the voucher Tally has just created back by the master id it reports (LASTVCHID), so that the caller receives
+ * its guid and can alter or delete it later without guessing. An Object export answers in milliseconds wherever the
+ * voucher is dated; the generic voucher collection needs Tally to switch period, which took seconds per voucher
+ */
+async function readBackCreated(masterId, company, callDeadline) {
+    if (!masterId || callDeadline - Date.now() < 1000)
+        return undefined;
+    return findVoucherByMasterId(masterId, company, Math.min(callDeadline, Date.now() + 10000)).catch(() => undefined);
 }
 export async function registerMcpServer() {
     const mcpServer = new McpServer({
@@ -623,7 +815,7 @@ export async function registerMcpServer() {
             }
             let lstFilters = new Map();
             if (args.containsFilter) {
-                lstFilters.set('Search_Contains', `$Name CONTAINS "${utility.String.normaliseName(args.containsFilter).replace(/"/g, '')}"`); //filter accepted raw or escaped; strip double quotes to avoid TDL syntax error
+                lstFilters.set('Search_Contains', `$Name CONTAINS ${tdlString(utility.String.normaliseName(args.containsFilter))}`); //filter accepted raw or escaped; a double quote travels via $$StrByCharCode:34
             }
             let result = await queryCollection(targetCollection, ['Name'], lstFilters, company);
             return {
@@ -683,7 +875,7 @@ export async function registerMcpServer() {
             const company = await resolveTargetCompany(args.targetCompany);
             let lstFilters = new Map();
             if (args.group_name) {
-                lstFilters.set('Specific_Group', `$$IsEqual:$Parent:"${tdlString(await resolveLookupName('Group', args.group_name, company))}"`); //group name accepted raw or escaped; a miss lists near matches
+                lstFilters.set('Specific_Group', `$$IsEqual:$Parent:${tdlString(await resolveLookupName('Group', args.group_name, company))}`); //group name accepted raw or escaped; a miss lists near matches
             }
             let result = await queryCollection('Ledger', ['Name', 'Parent', 'OpeningBalance', 'DebitTotals', 'CreditTotals', 'ClosingBalance'], lstFilters, company, new Date(args.fromDate), new Date(args.toDate));
             result = renameObjectArrayProperties(result, new Map([['Name', 'ledger_name'], ['Parent', 'group_name'], ['OpeningBalance', 'opening_balance'], ['DebitTotals', 'net_debit'], ['CreditTotals', 'net_credit'], ['ClosingBalance', 'closing_balance']]));
@@ -814,7 +1006,7 @@ export async function registerMcpServer() {
             const company = await resolveTargetCompany(args.targetCompany);
             let lstFilters = new Map();
             if (args.stockGroup) {
-                lstFilters.set('Specific_StockGroup', `$$IsEqual:$Parent:"${tdlString(await resolveLookupName('StockGroup', args.stockGroup, company))}"`); //stock group accepted raw or escaped; a miss lists near matches
+                lstFilters.set('Specific_StockGroup', `$$IsEqual:$Parent:${tdlString(await resolveLookupName('StockGroup', args.stockGroup, company))}`); //stock group accepted raw or escaped; a miss lists near matches
             }
             let result = await queryCollection('StockItem', ['Name', 'Parent', 'OpeningBalance', 'OpeningValue', 'InwardQuantity', 'InwardValue', 'OutwardQuantity', 'OutwardValue', 'ClosingBalance', 'ClosingValue', 'AffectsGrossProfit', 'SortPosition'], lstFilters, company, new Date(args.fromDate), new Date(args.toDate));
             result = renameObjectArrayProperties(result, new Map([['Name', 'stock_item_name'], ['Parent', 'stock_group_name'], ['OpeningBalance', 'opening_quantity'], ['OpeningValue', 'opening_value'], ['InwardQuantity', 'inward_quantity'], ['InwardValue', 'inward_value'], ['OutwardQuantity', 'outward_quantity'], ['OutwardValue', 'outward_value'], ['ClosingBalance', 'closing_quantity'], ['ClosingValue', 'closing_value']]));
@@ -846,7 +1038,7 @@ export async function registerMcpServer() {
         try {
             const company = await resolveTargetCompany(args.targetCompany);
             const ledgerName = await resolveLookupName('Ledger', args.ledgerName, company); //accepts the name raw or escaped; throws a descriptive error listing near matches
-            let lstFilters = new Map([['Exact_Ledger', `$$IsEqual:$Name:"${tdlString(ledgerName)}"`]]);
+            let lstFilters = new Map([['Exact_Ledger', `$$IsEqual:$Name:${tdlString(ledgerName)}`]]);
             let result = await queryCollection('Ledger', ['ClosingBalance'], lstFilters, company, undefined, parseInputDate(args.toDate));
             if (result.length > 0) {
                 return { content: [{ type: 'text', text: JSON.stringify({ ledger_name: ledgerName, amount: result[0].ClosingBalance, company }) }] };
@@ -878,7 +1070,7 @@ export async function registerMcpServer() {
         try {
             const company = await resolveTargetCompany(args.targetCompany);
             const itemName = await resolveLookupName('StockItem', args.itemName, company); //accepts the name raw or escaped; throws a descriptive error listing near matches
-            let lstFilters = new Map([['Exact_StockItem', `$$IsEqual:$Name:"${tdlString(itemName)}"`]]);
+            let lstFilters = new Map([['Exact_StockItem', `$$IsEqual:$Name:${tdlString(itemName)}`]]);
             let result = await queryCollection('StockItem', ['ClosingBalance', 'Unit'], lstFilters, company, undefined, parseInputDate(args.toDate));
             if (result.length === 0) {
                 return { isError: true, content: [{ type: 'text', text: `Stock item "${itemName}" exists in Tally but returned no balance row for the given date. Kindly validate the name using list-master tool with collection as stockitem` }] };
@@ -1536,12 +1728,12 @@ export async function registerMcpServer() {
         });
         mcpServer.registerTool('voucher-create-update', {
             title: 'Create or Update Voucher',
-            description: `creates accounting and / or inventory vouchers (transactions like payment, receipt, contra, journal, sales, purchase, debit note, credit note, delivery note, receipt note, stock journal) in Tally Prime, or updates an existing voucher when its guid is supplied. amount convention is debit is negative and credit is positive, and the sum of all amounts of a voucher must be zero. quantity is always an absolute positive number, since inward or outward movement is derived by Tally from the voucher type. when guid is supplied the voucher is fully replaced by the supplied content, so send every entry of that voucher and not just the changed one. guid of an existing voucher can be picked from the output of ledger-account tool. returns count of created and / or altered records. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the write is applied to that company only and the response echoes it in a company property`,
+            description: `creates accounting and / or inventory vouchers (transactions like payment, receipt, contra, journal, sales, purchase, debit note, credit note, delivery note, receipt note, stock journal) in Tally Prime, or updates an existing voucher when its guid is supplied. amount convention is debit is negative and credit is positive, and the sum of all amounts of a voucher must be zero. quantity is always an absolute positive number, since inward or outward movement is derived by Tally from the voucher type. when guid is supplied the voucher is fully replaced by the supplied content, so send every entry of that voucher and not just the changed one. guid of an existing voucher can be picked from the output of ledger-account tool, or from the vouchers array this tool returned when the voucher was created; a guid must never be built or guessed from other guids, and a guid naming no voucher of targetCompany is refused before anything is posted. Tally finds the voucher to change by its current date, voucher type and number, read from Tally just before it is posted: it keeps its number unless voucherNumber is given (when the date changes on a voucher type numbered automatically, Tally gives it the next number of the new date, and the number it holds is returned), its voucher type cannot be changed, a voucher whose number another voucher of its type shares on that date, or which has no number, is refused (change it on the Tally screen), and every change is read back afterwards. returns count of created and / or altered records and a vouchers array with, for every voucher in the order supplied, action (created or altered), guid, date, voucherType and voucherNumber, and for an altered voucher confirmed (true when Tally was read back and holds the change). vouchers are posted one at a time, so when one is rejected the error lists the vouchers saved before it, which must not be resent without their guid. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the write is applied to that company only and the response echoes it in a company property`,
             inputSchema: {
                 targetCompany: targetCompanySchema,
                 vouchers: z.array(z.object({
-                    guid: z.string().optional().describe('optional guid of an existing voucher to update it, obtained from ledger-account tool. skip it to create a new voucher'),
-                    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('voucher date, must fall within the financial year of the company'),
+                    guid: z.string().optional().describe('optional guid of an existing voucher to update it, obtained from ledger-account tool or from the vouchers array returned when it was created. never build or guess it. skip it to create a new voucher'),
+                    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('voucher date in YYYY-MM-DD, must fall within the financial year of the company'),
                     voucherType: z.string().describe('voucher type name like Payment, Receipt, Contra, Journal, Sales, Purchase, Credit Note, Debit Note, Delivery Note, Receipt Note, validate it using list-master tool with collection as vouchertype'),
                     voucherNumber: z.string().optional().describe('optional voucher number, skip it to let Tally auto-number the voucher as per the numbering method of the voucher type'),
                     reference: z.string().optional().describe('optional reference like purchase order number or supplier invoice number'),
@@ -1576,6 +1768,7 @@ export async function registerMcpServer() {
                 idempotentHint: false
             }
         }, async (args) => {
+            const start = Date.now();
             try {
                 const company = await resolveTargetCompany(args.targetCompany);
                 // arithmetic is checked first because it costs nothing. Resolving master names needs a
@@ -1683,9 +1876,155 @@ export async function registerMcpServer() {
                         destinationEntries: lstDestinationEntry
                     });
                 }
-                let result = await importVouchers(lstObjVoucher, company);
+                // a guid which names no voucher is refused before anything is posted, or Tally would create it
+                const lstTarget = lstObjVoucher.map((voucher, index) => ({ index, guid: voucher.guid, date: voucher.date })).filter((target) => target.guid);
+                if (lstTarget.length > 0) {
+                    let lookup;
+                    try {
+                        lookup = await resolveVoucherTargets(lstTarget, company, start + Math.floor(tallyTimeoutMs * 0.5), false);
+                    }
+                    catch (err) {
+                        if (err instanceof VoucherLookupBudgetError)
+                            throw new Error('Tally took too long to look up the vouchers to change, so nothing was sent to Tally. Try again in a minute, or send fewer vouchers per call');
+                        throw err;
+                    }
+                    if (lookup.problems.length > 0) {
+                        const lstMissing = lookup.problems.filter((problem) => problem.kind === 'not_found' || problem.kind === 'needs_date');
+                        const lstOther = lookup.problems.filter((problem) => !lstMissing.includes(problem));
+                        const lstText = [];
+                        if (lstMissing.length > 0)
+                            lstText.push(`No voucher with guid ${Array.from(new Set(lstMissing.map((problem) => problem.guid))).join(', ')} exists in company ${company}, so nothing was sent to Tally (Tally would have created a new voucher instead of changing one). ${missingVoucherAdvice}`);
+                        lstText.push(...lstOther.map((problem) => problem.message));
+                        throw new Error(lstText.join('\n'));
+                    }
+                    // Tally holds the voucher type of an existing voucher fixed: an Alter naming another type would not change it
+                    const lstTypeProblem = [];
+                    for (const voucher of lookup.resolved) {
+                        lstObjVoucher[voucher.index].resolved = voucher;
+                        if (utility.String.nameKey(lstObjVoucher[voucher.index].voucherType || '') !== utility.String.nameKey(voucher.voucherType))
+                            lstTypeProblem.push(`voucher ${voucher.index + 1} (guid ${voucher.guid}): Tally holds it as a ${voucher.voucherType} voucher, and the voucher type of an existing voucher cannot be changed through the connector. Delete it and create a new one instead`);
+                    }
+                    if (lstTypeProblem.length > 0)
+                        throw new Error(`Nothing was sent to Tally:\n- ${lstTypeProblem.join('\n- ')}`);
+                }
+                // a guid without its lookup would turn the Alter into a Create
+                lstObjVoucher.forEach((voucher, i) => {
+                    if (voucher.guid && !voucher.resolved)
+                        throw new Error(`internal: voucher ${i + 1} has a guid but was not looked up; nothing was sent`);
+                });
+                // vouchers are posted one at a time: Tally reports the id of only the last voucher it creates in a
+                // request, and a voucher is saved or rejected on its own anyway, so a batch was never all or nothing.
+                // each created voucher is read back for its guid, so that it can be altered later without guessing
+                const result = { created: 0, altered: 0, vouchers: [] };
+                // the lookups, the posts and the read-backs share one budget, kept under the 60s the Claude relay
+                // allows: a voucher is posted only while enough of it remains
+                const callDeadline = start + tallyTimeoutMs;
+                const minPostWindowMs = Math.max(500, Math.floor(tallyTimeoutMs * 0.15));
+                for (let i = 0; i < lstObjVoucher.length; i++) {
+                    const objVoucher = lstObjVoucher[i];
+                    const label = `voucher ${i + 1} of ${lstObjVoucher.length} (${objVoucher.voucherType} dated ${args.vouchers[i].date})`;
+                    const saved = result.vouchers.length > 0 ? ` The vouchers before it were saved: ${JSON.stringify(result.vouchers)}.` : ' Nothing was saved.';
+                    let status;
+                    if (callDeadline - Date.now() < minPostWindowMs)
+                        throw new Error(`Time ran out before ${label} was sent, so it and the vouchers after it were not sent to Tally.${saved} Send the vouchers not sent again in a new call, and do not resend the saved ones without their guid, or they will be created twice`);
+                    if (!objVoucher.guid) {
+                        try {
+                            status = await importVouchers([objVoucher], company, callDeadline);
+                        }
+                        catch (err) {
+                            if (isTallyTimeout(err))
+                                throw new Error(`Tally did not answer in time for ${label}, so it is not known whether it was saved.${saved} Check with ledger-account before sending it again, or it may be created twice`);
+                            throw new Error(`Tally did not save ${label}: ${formatError(err)}.${saved} Do not resend the saved vouchers without their guid, or they will be created twice`);
+                        }
+                        result.created += status.created || 0;
+                        result.altered += status.altered || 0;
+                        const created = await readBackCreated(status.lastVoucherId, company, callDeadline);
+                        result.vouchers.push(created
+                            ? { action: 'created', guid: created.guid, date: args.vouchers[i].date, voucherType: created.voucherType, voucherNumber: created.voucherNumber }
+                            : { action: 'created', guid: null, date: args.vouchers[i].date, voucherType: objVoucher.voucherType, note: 'the guid could not be read back; take it from ledger-account before altering this voucher' });
+                        continue;
+                    }
+                    // an existing voucher: its number can change while an earlier voucher of the call is saved, so it is read again now,
+                    // and Tally is pointed at it by its date, type and number as they are at this moment
+                    const resolved = objVoucher.resolved;
+                    let fresh;
+                    let check;
+                    try {
+                        fresh = await findVoucherByMasterId(resolved.masterId, company, callDeadline);
+                        if (!fresh || fresh.guid.toLowerCase() !== resolved.guid.toLowerCase())
+                            throw new TargetRefusedError(`voucher ${resolved.guid} is no longer in the books of company ${company} (it may have just been deleted in Tally), so it was not changed`);
+                        check = await chooseImportTarget(fresh, company, callDeadline, 'change');
+                    }
+                    catch (err) {
+                        if (isTallyTimeout(err))
+                            throw new Error(`Tally did not answer in time while ${label} was checked just before it was sent, so it was not sent.${saved} Send it and the vouchers after it again in a new call`);
+                        // whatever went wrong, the caller must still learn which vouchers were already saved, or a resend would create them twice
+                        throw new Error(`${label}: ${err instanceof TargetRefusedError ? err.message : formatError(err)}. Nothing was sent for it, and the vouchers after it were not sent.${saved}`);
+                    }
+                    objVoucher.target = check.target;
+                    objVoucher.voucherType = fresh.voucherType;
+                    objVoucher.voucherNumber = args.vouchers[i].voucherNumber?.trim() || fresh.voucherNumber || undefined; //always sent: an Alter without a number may blank it
+                    try {
+                        status = await importVouchers([objVoucher], company, callDeadline);
+                    }
+                    catch (err) {
+                        if (isTallyTimeout(err))
+                            throw new Error(`Tally did not answer in time for ${label}, so it is not known whether it was saved.${saved} Check with ledger-account before sending it again, or it may be created twice`);
+                        const reason = err instanceof Error && /voucher does not exist/i.test(err.message)
+                            ? new Error(`Tally did not find ${fresh.voucherType} ${fresh.voucherNumber} dated ${isoDate(fresh.date)} although it was there a moment ago`)
+                            : err;
+                        throw new Error(`Tally did not save ${label}: ${formatError(reason)}.${saved} Do not resend the saved vouchers without their guid, or they will be created twice`);
+                    }
+                    result.created += status.created || 0;
+                    result.altered += status.altered || 0;
+                    if (status.created) {
+                        // Tally did not find the voucher by its key after all and saved the correction as a new voucher
+                        const created = await readBackCreated(status.lastVoucherId, company, callDeadline);
+                        result.vouchers.push({ action: 'created', guid: created?.guid ?? null, date: args.vouchers[i].date, voucherType: objVoucher.voucherType, voucherNumber: created?.voucherNumber, warning: `Tally saved this correction as a new voucher instead of changing voucher ${resolved.guid}, which is unchanged` });
+                        throw new Error(`Tally created a new voucher (guid ${created?.guid ?? 'not read back'}) for ${label} instead of changing voucher ${resolved.guid}, which is unchanged. Tell the user, and delete the new voucher with voucher-delete if they confirm. The vouchers after it were not sent. Saved so far: ${JSON.stringify(result.vouchers)}`);
+                    }
+                    if (status.altered !== 1)
+                        throw new Error(`Tally answered without changing ${label} (altered ${status.altered}).${saved}`);
+                    // Tally is asked again whether the voucher really changed, since an import which hit nothing is also answered "altered"
+                    let after;
+                    let confirmed = null;
+                    const lstWarning = [];
+                    let note;
+                    if (callDeadline - Date.now() >= 1000) {
+                        try {
+                            after = await findVoucherByMasterId(resolved.masterId, company, callDeadline);
+                            confirmed = !!after && (after.alterId ?? 0) > (fresh.alterId ?? 0) && isoDate(after.date) === isoDate(objVoucher.date);
+                            if (!after)
+                                lstWarning.push(`Tally reported the change, but voucher ${resolved.guid} is no longer in the books; check the Day Book in Tally`);
+                            else if ((after.alterId ?? 0) <= (fresh.alterId ?? 0))
+                                lstWarning.push('Tally reported a change, but this voucher was not changed, so another voucher may have been changed instead; check the Day Book in Tally');
+                            else if (isoDate(after.date) !== isoDate(objVoucher.date))
+                                lstWarning.push(`Tally changed this voucher but holds it dated ${isoDate(after.date)}, not ${isoDate(objVoucher.date)}`);
+                            if (after && objVoucher.voucherNumber && after.voucherNumber !== objVoucher.voucherNumber)
+                                note = `Tally numbered it ${after.voucherNumber}`;
+                            for (const other of check.lstOther) {
+                                if (callDeadline - Date.now() < 1000)
+                                    break;
+                                const otherAfter = await findVoucherByMasterId(other.masterId, company, callDeadline);
+                                if (!otherAfter || otherAfter.alterId !== other.alterId)
+                                    lstWarning.push(`Tally also changed ${other.voucherType} ${other.voucherNumber} (guid ${other.guid}) dated the same day; check it in Tally`);
+                            }
+                        }
+                        catch {
+                            after = undefined;
+                            confirmed = null; //Tally could not be asked in time
+                        }
+                    }
+                    result.vouchers.push({
+                        action: 'altered', guid: resolved.guid, date: args.vouchers[i].date, voucherType: fresh.voucherType,
+                        voucherNumber: after?.voucherNumber ?? objVoucher.voucherNumber, confirmed,
+                        ...(note ? { note } : {}), ...(lstWarning.length > 0 ? { warning: lstWarning.join('; ') } : {})
+                    });
+                }
+                const attention = result.vouchers.some((voucher) => voucher.warning || voucher.confirmed === false);
                 return {
-                    content: [{ type: 'text', text: JSON.stringify({ ...result, company }) }]
+                    ...(attention ? { isError: true } : {}),
+                    content: [{ type: 'text', text: JSON.stringify(attention ? { ...result, company, message: 'Tally answered every post, but the vouchers with a warning need checking in Tally' } : { ...result, company }) }]
                 };
             }
             catch (err) {
@@ -1697,15 +2036,15 @@ export async function registerMcpServer() {
         });
         mcpServer.registerTool('voucher-delete', {
             title: 'Delete Voucher',
-            description: `deletes vouchers (transactions) from Tally Prime permanently and returns count of deleted records. every voucher is identified by its guid, which along with date, voucher type and voucher number can be picked from the output of ledger-account tool. this operation cannot be undone, so confirm with the user before calling this tool. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the write is applied to that company only and the response echoes it in a company property`,
+            description: `deletes vouchers (transactions) from Tally Prime permanently. identify each voucher by its guid (from the guid column of ledger-account, or from the vouchers array returned by voucher-create-update), or, when no guid is at hand, by its date, voucherType and voucherNumber together. every voucher is looked up in Tally before anything is deleted: a guid naming no voucher of targetCompany, a date, voucher type or number which does not match what Tally holds for that guid, or a number matching more than one voucher is refused, and then nothing in the call is deleted. Tally finds a voucher to delete by its date, voucher type and voucher number, and renumbers the later vouchers of that type as soon as one is deleted, so every voucher is read again just before it is sent; a voucher whose number another voucher of the same type shares on that date (an optional voucher takes the number of the regular one beside it), or which has no number, is not deleted (status failed, delete it on the Tally screen). alongside a guid, date, voucherType and voucherNumber are optional and only cross-checked. a guid must never be built or guessed. this cannot be undone, so confirm with the user which voucher is meant before calling. returns deleted, failed, unknown and notAttempted counts and a vouchers array with, for every voucher in the order supplied, status (deleted, failed, unknown or not_attempted), guid, date (YYYY-MM-DD), voucherType, voucherNumber and confirmed (true when Tally was checked afterwards and the voucher is gone). targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info; the write is applied to that company only and the response echoes it in a company property`,
             inputSchema: {
                 targetCompany: targetCompanySchema,
                 vouchers: z.array(z.object({
-                    guid: z.string().describe('guid of the voucher to delete, obtained from ledger-account tool'),
-                    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('date of the voucher to delete'),
-                    voucherType: z.string().describe('voucher type name of the voucher to delete'),
-                    voucherNumber: z.string().optional().describe('optional voucher number of the voucher to delete')
-                })).min(1).describe('array of vouchers to delete')
+                    guid: z.string().optional().describe('guid of the voucher to delete, from the guid column of ledger-account or from the vouchers array returned by voucher-create-update. never build or guess it. may be left out only when date, voucherType and voucherNumber are all given'),
+                    date: z.string().optional().describe('voucher date in YYYY-MM-DD (DD/MM/YYYY is also accepted). optional with a guid, where it is only checked against Tally; required without a guid'),
+                    voucherType: z.string().optional().describe('voucher type name as shown by ledger-account (voucher_type). optional with a guid, where it is only checked against Tally; required without a guid'),
+                    voucherNumber: z.string().optional().describe('voucher number as shown by ledger-account (voucher_number). optional with a guid, where it is only checked against Tally; required without a guid')
+                })).min(1).describe('vouchers to delete')
             },
             annotations: {
                 readOnlyHint: false,
@@ -1714,18 +2053,168 @@ export async function registerMcpServer() {
                 idempotentHint: true
             }
         }, async (args) => {
+            // the lookups and the deletions share one budget, kept under the 60s the Claude relay allows
+            const start = Date.now();
+            const callDeadline = start + tallyTimeoutMs;
+            const lookupDeadline = start + Math.floor(tallyTimeoutMs * 0.6);
+            const minPostWindowMs = Math.max(500, Math.floor(tallyTimeoutMs * 0.15));
             try {
                 const company = await resolveTargetCompany(args.targetCompany);
-                const lstVoucherTypeName = await resolveMasterNames('VoucherType', args.vouchers.map((voucher) => voucher.voucherType), company);
-                const lstObjVoucher = args.vouchers.map((voucher) => ({
-                    guid: voucher.guid,
-                    date: parseInputDate(voucher.date),
-                    voucherType: lstVoucherTypeName.get(voucher.voucherType),
-                    voucherNumber: voucher.voucherNumber
-                }));
-                let result = await deleteVouchers(lstObjVoucher, company);
+                // everything which can be refused without asking Tally is refused first, all voucher problems together
+                const lstInputProblem = [];
+                const lstRequest = [];
+                args.vouchers.forEach((voucher, index) => {
+                    let date;
+                    if (voucher.date !== undefined && voucher.date.trim() !== '') {
+                        const parsed = parseVoucherDateInput(voucher.date);
+                        if (!parsed)
+                            lstInputProblem.push(`voucher ${index + 1}: date "${voucher.date}" is not a valid date; use YYYY-MM-DD, for example 2025-04-30`);
+                        else
+                            date = parsed;
+                    }
+                    const guid = voucher.guid?.trim() || undefined;
+                    const voucherType = voucher.voucherType?.trim() || undefined;
+                    const voucherNumber = voucher.voucherNumber?.trim() || undefined;
+                    if (!guid && !(voucher.date?.trim() && voucherType && voucherNumber))
+                        lstInputProblem.push(`voucher ${index + 1}: give its guid (from ledger-account, or from the vouchers array of voucher-create-update), or its date, voucherType and voucherNumber together`);
+                    lstRequest.push({ index, guid, date, voucherType, voucherNumber });
+                });
+                if (lstInputProblem.length > 0)
+                    throw new Error(lstInputProblem.join('\n'));
+                let lookup;
+                try {
+                    lookup = await resolveVoucherTargets(lstRequest, company, lookupDeadline, true);
+                }
+                catch (err) {
+                    if (err instanceof VoucherLookupBudgetError) {
+                        if (err.confirmed > 0)
+                            throw new Error(`Tally took too long to look up the vouchers to delete (${err.confirmed} of ${err.total} confirmed in ${Math.round(err.elapsedMs / 1000)}s), so nothing was deleted. Send at most ${err.confirmed} vouchers per call`);
+                        throw new Error('Tally did not answer the voucher lookup in time, so nothing was deleted. Tally may still be busy, for example finishing an earlier report; try again in a minute');
+                    }
+                    throw err;
+                }
+                if (lookup.problems.length > 0) {
+                    const lstProblemIndex = new Set(lookup.problems.map((problem) => problem.index));
+                    throw new Error(`Nothing was deleted from company ${company}, because ${lstProblemIndex.size} of ${args.vouchers.length} voucher(s) could not be confirmed:\n- ${lookup.problems.map((problem) => problem.message).join('\n- ')}${lookup.resolved.length > 0 ? '\nThe other vouchers were found as given and can be sent again on their own.' : ''}`);
+                }
+                // whether a voucher is gone, asked of Tally by its master id; null when that cannot be told in the time left
+                const confirmGone = async (voucher) => {
+                    if (callDeadline - Date.now() < minPostWindowMs)
+                        return null;
+                    try {
+                        return (await findVoucherByMasterId(voucher.masterId, company, callDeadline)) === undefined;
+                    }
+                    catch {
+                        return null;
+                    }
+                };
+                // one voucher per request, in the order supplied, so each answer belongs to one voucher. Tally renumbers the later vouchers of
+                // a type as soon as one is deleted, so every voucher is read again just before it is sent and is found by the number it has then
+                const notAnswered = 'Tally did not answer in time when this voucher was checked just before deletion; nothing was sent for it, send it again in a new call';
+                const lstEntry = [];
+                for (const voucher of lookup.resolved) {
+                    const entry = { status: 'failed', guid: voucher.guid, date: isoDate(voucher.date), voucherType: voucher.voucherType, voucherNumber: voucher.voucherNumber };
+                    lstEntry.push(entry);
+                    if (callDeadline - Date.now() < minPostWindowMs) {
+                        entry.status = 'not_attempted';
+                        entry.error = 'time ran out before this voucher was sent; nothing was done to it, send it again in a new call';
+                        continue;
+                    }
+                    let fresh;
+                    let check;
+                    try {
+                        fresh = await findVoucherByMasterId(voucher.masterId, company, callDeadline);
+                        if (!fresh || fresh.guid.toLowerCase() !== voucher.guid.toLowerCase()) {
+                            entry.error = 'this voucher is no longer in the books (it may have just been deleted in Tally); nothing was sent for it';
+                            continue;
+                        }
+                        entry.date = isoDate(fresh.date);
+                        entry.voucherNumber = fresh.voucherNumber;
+                        check = await chooseImportTarget(fresh, company, callDeadline, 'delete');
+                    }
+                    catch (err) {
+                        if (isTallyTimeout(err)) {
+                            entry.status = 'not_attempted';
+                            entry.error = notAnswered;
+                        }
+                        else {
+                            entry.error = err instanceof TargetRefusedError ? err.message : formatError(err);
+                        }
+                        continue;
+                    }
+                    let reported = false;
+                    try {
+                        const status = await deleteVouchers([{ target: check.target, date: fresh.date, voucherType: fresh.voucherType }], company, callDeadline);
+                        if (status.deleted === 1)
+                            reported = true;
+                        else
+                            entry.error = `Tally answered without deleting it (deleted ${status.deleted})`;
+                    }
+                    catch (err) {
+                        if (err instanceof Error && /voucher does not exist/i.test(err.message)) {
+                            entry.error = `Tally did not find ${fresh.voucherType} ${fresh.voucherNumber || '(no number)'} dated ${isoDate(fresh.date)} although it was there a moment ago; nothing was deleted`;
+                        }
+                        else if (isTallyTimeout(err)) {
+                            const gone = await confirmGone(fresh);
+                            if (gone === true) {
+                                entry.status = 'deleted';
+                                entry.confirmed = true;
+                            }
+                            else if (gone === false) {
+                                entry.error = 'Tally did not answer in time and the voucher is still in the books';
+                            }
+                            else {
+                                entry.status = 'unknown';
+                                entry.error = 'Tally did not answer in time, so it is not known whether this voucher was deleted; check with ledger-account before sending it again';
+                            }
+                        }
+                        else {
+                            entry.error = formatError(err);
+                        }
+                    }
+                    if (reported) {
+                        // a reported deletion is checked against the books, since Tally answers "deleted" for whichever voucher the key hit
+                        const gone = await confirmGone(fresh);
+                        if (gone === false)
+                            entry.error = 'Tally reported a deletion, but this voucher is still in the books, so another voucher may have been deleted instead; check the Day Book in Tally';
+                        else
+                            entry.status = 'deleted';
+                        entry.confirmed = gone;
+                    }
+                    if (entry.status === 'deleted') {
+                        // the other vouchers which carry the same number that day (of another type) must still be there
+                        for (const other of check.lstOther) {
+                            if (callDeadline - Date.now() < minPostWindowMs)
+                                break;
+                            const otherNow = await findVoucherByMasterId(other.masterId, company, callDeadline).catch(() => other);
+                            if (!otherNow) {
+                                entry.status = 'failed';
+                                entry.error = `Tally deleted this voucher but ${other.voucherType} ${other.voucherNumber} (guid ${other.guid}) dated the same day is gone too; check the Day Book in Tally`;
+                                break;
+                            }
+                        }
+                    }
+                    if (entry.status === 'deleted') {
+                        const lstNote = [];
+                        if (fresh.voucherNumber !== voucher.voucherNumber)
+                            lstNote.push(`Tally had renumbered it from ${voucher.voucherNumber} to ${fresh.voucherNumber} after an earlier deletion; it was deleted by its current number`);
+                        if (check.target.kind === 'remoteId')
+                            lstNote.push(`deleted through the id another program gave it (${check.target.remoteId}), since it has no voucher number`);
+                        if (lstNote.length > 0)
+                            entry.note = lstNote.join('; ');
+                    }
+                }
+                const count = (status) => lstEntry.filter((entry) => entry.status === status).length;
+                const result = { deleted: count('deleted'), failed: count('failed'), unknown: count('unknown'), notAttempted: count('not_attempted'), vouchers: lstEntry, company };
+                if (result.deleted < lstEntry.length) {
+                    result.message = `${result.deleted} of ${lstEntry.length} vouchers were deleted. Vouchers with status failed or unknown may still be in the books; send those with status not_attempted again in a new call`;
+                    return {
+                        isError: true,
+                        content: [{ type: 'text', text: JSON.stringify(result) }]
+                    };
+                }
                 return {
-                    content: [{ type: 'text', text: JSON.stringify({ ...result, company }) }]
+                    content: [{ type: 'text', text: JSON.stringify(result) }]
                 };
             }
             catch (err) {

@@ -44,7 +44,7 @@
                         <XMLTAG>voucher_type</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldAmountOp">
-                        <SET>if $$IsDebit:$OpeningBalance:Ledger:"{{ ledgerName }}" then -$$NumValue:$OpeningBalance:Ledger:"{{ ledgerName }}" else $$NumValue:$OpeningBalance:Ledger:"{{ ledgerName }}"</SET>
+                        <SET>if $$IsDebit:$OpeningBalance:Ledger:{{ ledgerName }} then -$$NumValue:$OpeningBalance:Ledger:{{ ledgerName }} else $$NumValue:$OpeningBalance:Ledger:{{ ledgerName }}</SET>
                         <XMLTAG>amount</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldDateCl">
@@ -56,11 +56,11 @@
                         <XMLTAG>voucher_type</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldAmountCl">
-                        <SET>if $$IsDebit:$ClosingBalance:Ledger:"{{ ledgerName }}" then -$$NumValue:$ClosingBalance:Ledger:"{{ ledgerName }}" else $$NumValue:$ClosingBalance:Ledger:"{{ ledgerName }}"</SET>
+                        <SET>if $$IsDebit:$ClosingBalance:Ledger:{{ ledgerName }} then -$$NumValue:$ClosingBalance:Ledger:{{ ledgerName }} else $$NumValue:$ClosingBalance:Ledger:{{ ledgerName }}</SET>
                         <XMLTAG>amount</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldPrimaryGroupCl">
-                        <SET>$_PrimaryGroup:Ledger:"{{ ledgerName }}"</SET>
+                        <SET>$_PrimaryGroup:Ledger:{{ ledgerName }}</SET>
                         <XMLTAG>primary_group</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldIsIntegratedCl">
@@ -68,7 +68,7 @@
                         <XMLTAG>is_integrated</XMLTAG>
                     </FIELD>
                     <FIELD NAME="FldIsRevenueCl">
-                        <SET>$IsRevenue:Ledger:"{{ ledgerName }}"</SET>
+                        <SET>$IsRevenue:Ledger:{{ ledgerName }}</SET>
                         <XMLTAG>is_revenue</XMLTAG>
                     </FIELD>
                 </TDLMESSAGE>

@@ -3,7 +3,7 @@ import net from 'node:net';
 import nunjucks from 'nunjucks';
 import { XMLParser } from 'fast-xml-parser';
 import { utility } from './utility.mjs';
-import { lstCollectionFields, lstPushXml, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers } from './definition.mjs';
+import { lstCollectionFields, lstInternalCollectionFields, lstPushXml, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers, xmlVoucherObject, xmlVoucherKeyLookup } from './definition.mjs';
 import { logDebug, logInfo, logWarn } from './log.mjs';
 import { getTallyConnection, isValidPort } from './connection.mjs';
 import { TallyTransportError } from './tallyerror.mjs';
@@ -63,7 +63,7 @@ function getTemplate(xml) {
  * Compiles every known template ahead of the first request
  */
 function precompileTemplates() {
-    let lstXml = [xmlQueryCollection, xmlInvokeAction, xmlDeleteMasters, xmlDeleteVouchers, ...lstReportXml.values(), ...lstPushXml.values()];
+    let lstXml = [xmlQueryCollection, xmlInvokeAction, xmlDeleteMasters, xmlDeleteVouchers, xmlVoucherObject, xmlVoucherKeyLookup, ...lstReportXml.values(), ...lstPushXml.values()];
     for (const xml of lstXml)
         getTemplate(xml);
     return lstXml.length;
@@ -125,7 +125,7 @@ async function runCollectionQuery(targetCollection, lstFields, lstFilters, targe
             objTemplateArgs.set('fromDate', fromDate);
         if (toDate)
             objTemplateArgs.set('toDate', toDate);
-        let objCollection = lstCollectionFields.filter(c => c.collection == targetCollection)[0]; //load collection definition
+        let objCollection = lstCollectionFields.filter(c => c.collection == targetCollection)[0] || lstInternalCollectionFields.filter(c => c.collection == targetCollection)[0]; //load collection definition
         objTemplateArgs.set('collection', objCollection.tallyType || targetCollection);
         let lstQueryFields = objCollection.fields.filter((f, i, all) => lstFields.includes(f.name) && all.findIndex(o => o.name == f.name) == i); //filter fields based on user query, each field once: a field defined twice in the TDL makes TallyPrime 2.1 pop a modal "Could not find description" which freezes it
         objTemplateArgs.set('fields', lstQueryFields); //filter fields queried by user
@@ -236,6 +236,9 @@ function parseImportResponse(respContent) {
     };
     if (retval.errors || retval.exceptions)
         throw new Error(`Tally rejected the request with ${retval.errors} error(s) and ${retval.exceptions} exception(s). Kindly validate master names, dates and amounts before retrying`);
+    const lastVoucherId = parseCount(objResponse['LASTVCHID']);
+    if (lastVoucherId > 0)
+        retval.lastVoucherId = lastVoucherId;
     return retval;
 }
 /**
@@ -243,12 +246,13 @@ function parseImportResponse(respContent) {
  * @param targetTemplate key of the template registered in lstPushXml
  * @param objInput template arguments
  */
-export async function importData(targetTemplate, objInput) {
+export async function importData(targetTemplate, objInput, deadline) {
     try {
         let xmlTemplate = lstPushXml.get(targetTemplate);
         if (!xmlTemplate)
             throw new Error(`No import template found for ${targetTemplate}`);
-        let respContent = await sendTallyXml(xmlTemplate, objInput); //send XML to Tally and get response
+        //a caller running several writes under one budget passes its deadline; a write is never retried once sent
+        let respContent = await sendTallyXml(xmlTemplate, objInput, undefined, undefined, deadline ? { idempotent: false, label: `import:${targetTemplate}`, deadline } : undefined); //send XML to Tally and get response
         return parseImportResponse(respContent);
     }
     catch (err) {
@@ -258,13 +262,117 @@ export async function importData(targetTemplate, objInput) {
 export async function importMasters(targetMaster, objMasterInput) {
     return importData(targetMaster, objMasterInput);
 }
-export async function importVouchers(lstVoucher, targetCompany) {
+/**
+ * Every voucher to alter or delete must carry a key Tally can find it by. A voucher with a guid but no target would otherwise
+ * be posted as a Create (a duplicate), and a target without a number or id matches nothing
+ */
+function assertImportTarget(voucher, verb) {
+    const t = voucher?.target;
+    const ok = t && ((t.kind === 'number' && typeof t.voucherNumber === 'string' && t.voucherNumber.trim() !== '' && t.date instanceof Date && !isNaN(t.date.getTime()) && String(t.voucherType || '').trim() !== '')
+        || (t.kind === 'remoteId' && typeof t.remoteId === 'string' && t.remoteId.trim() !== ''));
+    if (!ok)
+        throw new Error(`internal: a voucher to ${verb} has no confirmed key in Tally, so nothing was sent`);
+}
+export async function importVouchers(lstVoucher, targetCompany, deadline) {
+    lstVoucher.forEach(v => { if (v.target || v.guid)
+        assertImportTarget(v, 'change'); }); //a guid without a target must never become a Create
     let objTemplateArgs = new Map();
     objTemplateArgs.set('vouchers', lstVoucher);
     if (targetCompany) {
         objTemplateArgs.set('targetCompany', targetCompany);
     }
-    return importData('voucher', objTemplateArgs);
+    return importData('voucher', objTemplateArgs, deadline);
+}
+/**
+ * The id Tally matches an import's REMOTEID against: the stored remote GUID when the voucher has one
+ * (a voucher imported by another program), else its GUID
+ */
+function identityKey(guid, remoteGuid) {
+    return remoteGuid && remoteGuid.trim() ? remoteGuid.trim() : guid;
+}
+/** text of a parsed XML value, which fast-xml-parser may hand back as an object when the tag carries attributes */
+function xmlText(value) {
+    if (value === undefined || value === null)
+        return '';
+    if (typeof value === 'object')
+        return xmlText(value['#text']);
+    return value.toString();
+}
+/**
+ * Fetches one voucher by its master id, wherever it is dated. Returns undefined when the company holds
+ * no voucher with that id (Tally answers "Could not find Voucher:ID:n!").
+ * The answer is the whole voucher, with nested <DATE> tags inside its lists, so only the DIRECT children
+ * of the VOUCHER element are read
+ */
+export async function findVoucherByMasterId(masterId, targetCompany, deadline) {
+    const respContent = await sendTallyXml(xmlVoucherObject, new Map([['masterId', masterId], ['targetCompany', targetCompany]]), undefined, undefined, { idempotent: true, label: 'object:voucher', deadline });
+    const xmlParser = new XMLParser({ parseTagValue: false, htmlEntities: true, ignoreAttributes: true });
+    const objParsed = xmlParser.parse(respContent);
+    const objData = objParsed?.ENVELOPE?.BODY?.DATA;
+    // TallyPrime 7.0 answers an unknown id with a bare <ERRORMSG> outside any ENVELOPE (seen live); only that
+    // answer means "no such voucher", any other error message is raised so that it is never taken for one
+    const errorMessage = objParsed?.ERRORMSG ?? objData?.ERRORMSG;
+    if (errorMessage !== undefined) {
+        const text = xmlText(errorMessage);
+        if (/could not find voucher/i.test(text))
+            return undefined;
+        throw new Error(`Tally could not look up voucher ${masterId}: ${text}`);
+    }
+    let objMessage = objData?.TALLYMESSAGE;
+    if (Array.isArray(objMessage))
+        objMessage = objMessage[0];
+    let objVoucher = objMessage?.VOUCHER;
+    if (Array.isArray(objVoucher))
+        objVoucher = objVoucher[0];
+    if (!objVoucher || typeof objVoucher !== 'object')
+        throw new Error(`Tally answered the voucher lookup with something unexpected: ${respContent.slice(0, 200)}`);
+    const guid = utility.String.normaliseName(xmlText(objVoucher.GUID));
+    if (guid === '')
+        return undefined;
+    const remoteGuid = utility.String.unescapeHTML(xmlText(objVoucher.REMOTEGUID).trim()); //the stored id is compared byte for byte, so it is decoded but never normalised
+    const alterId = parseInt(xmlText(objVoucher.ALTERID).trim());
+    return {
+        guid,
+        remoteGuid,
+        remoteId: identityKey(guid, remoteGuid),
+        alterId: isNaN(alterId) ? undefined : alterId,
+        masterId: parseInt(xmlText(objVoucher.MASTERID)),
+        date: utility.Date.parse(xmlText(objVoucher.DATE).trim(), 'yyyyMMdd'),
+        voucherType: utility.String.normaliseName(xmlText(objVoucher.VOUCHERTYPENAME)),
+        voucherNumber: utility.String.normaliseName(xmlText(objVoucher.VOUCHERNUMBER))
+    };
+}
+/**
+ * Finds the vouchers of one day (or of the period date..toDate) which answer to a TDL filter, with the remote id Tally stores for each.
+ * A Data report is bound to the period given, so a single day is searched unless more is asked for; the generic voucher collection
+ * is not used because it returns $RemoteGUID empty
+ */
+export async function findVouchersByKey(filter, targetCompany, date, deadline, toDate) {
+    const respContent = await sendTallyXml(xmlVoucherKeyLookup, new Map([['fromDate', date], ['toDate', toDate ?? date], ['targetCompany', utility.String.normaliseName(targetCompany)], ['filter', filter]]), undefined, undefined, { idempotent: true, label: 'lookup:voucher-key', deadline });
+    assertCompleteEnvelope(respContent, false);
+    const xmlParser = new XMLParser({
+        parseTagValue: false,
+        htmlEntities: true,
+        isArray(tagName) {
+            return tagName == 'ROW';
+        }
+    });
+    const lstRow = xmlParser.parse(respContent)?.DATA?.ROW || [];
+    return lstRow.map((row) => {
+        const guid = utility.String.normaliseName(xmlText(row.GUID));
+        const remoteGuid = utility.String.unescapeHTML(xmlText(row.REMOTEGUID).trim());
+        const alterId = parseInt(xmlText(row.ALTERID).trim());
+        return {
+            guid,
+            remoteGuid,
+            remoteId: identityKey(guid, remoteGuid),
+            alterId: isNaN(alterId) ? undefined : alterId,
+            masterId: parseInt(xmlText(row.MASTERID)),
+            date: utility.Date.parse(xmlText(row.DATE).trim(), 'yyyy-MM-dd'),
+            voucherType: utility.String.normaliseName(xmlText(row.VOUCHERTYPENAME)),
+            voucherNumber: utility.String.normaliseName(xmlText(row.VOUCHERNUMBER))
+        };
+    });
 }
 export async function deleteMasters(targetCollection, lstMaster, targetCompany) {
     try {
@@ -282,14 +390,15 @@ export async function deleteMasters(targetCollection, lstMaster, targetCompany) 
         throw err;
     }
 }
-export async function deleteVouchers(lstVoucher, targetCompany) {
+export async function deleteVouchers(lstVoucher, targetCompany, deadline) {
     try {
+        lstVoucher.forEach(v => assertImportTarget(v, 'delete'));
         let objTemplateArgs = new Map();
         objTemplateArgs.set('vouchers', lstVoucher);
         if (targetCompany) {
             objTemplateArgs.set('targetCompany', targetCompany);
         }
-        let respContent = await sendTallyXml(xmlDeleteVouchers, objTemplateArgs);
+        let respContent = await sendTallyXml(xmlDeleteVouchers, objTemplateArgs, undefined, undefined, { idempotent: false, label: 'import:voucher-delete', deadline });
         return parseImportResponse(respContent);
     }
     catch (err) {

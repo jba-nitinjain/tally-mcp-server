@@ -67,7 +67,27 @@ export interface CreateUpdateDeleteStatus {
     cancelled?: number;
     errors?: number;
     exceptions?: number;
+    lastVoucherId?: number; //master id of the last voucher Tally created in the request (LASTVCHID), present only when one was created
 }
+
+export interface TallyVoucherIdentity {
+    guid: string;
+    /** stored remote GUID (REMOTEGUID), set when the voucher was imported with a REMOTEID other than its GUID */
+    remoteGuid?: string;
+    /** the id Tally matches an import's REMOTEID against: remoteGuid when non-empty, else guid */
+    remoteId?: string;
+    masterId: number;
+    date: Date;
+    voucherType: string;
+    voucherNumber: string;
+    /** ALTERID, raised by Tally on every change of the voucher */
+    alterId?: number;
+}
+
+/** how an import tells Tally which existing voucher to alter or delete: by date, type and number (works for every voucher), or by the id another program stored with it */
+export type TallyImportTarget =
+    | { kind: 'number'; date: Date; voucherType: string; voucherNumber: string }
+    | { kind: 'remoteId'; remoteId: string; voucherType: string };
 
 export interface TallyVoucherLedgerEntry {
     ledgerName: string;

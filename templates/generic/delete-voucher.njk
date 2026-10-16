@@ -15,12 +15,9 @@
             <REQUESTDATA>
                 {% for voucher in vouchers %}
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
-                    <VOUCHER REMOTEID="{{ voucher.guid | escape }}" VCHTYPE="{{ voucher.voucherType | escape }}" ACTION="Delete">
+                    <VOUCHER {% if voucher.target.kind == "number" %}DATE="{{ voucher.target.date | formatDate("d-MMM-yyyy") }}" TAGNAME="Voucher Number" TAGVALUE="{{ voucher.target.voucherNumber | escape }}"{% else %}REMOTEID="{{ voucher.target.remoteId | escape }}"{% endif %} VCHTYPE="{{ voucher.voucherType | escape }}" ACTION="Delete">
                         <DATE>{{ voucher.date | formatDate("yyyyMMdd") }}</DATE>
                         <VOUCHERTYPENAME>{{ voucher.voucherType | escape }}</VOUCHERTYPENAME>
-                        {% if voucher.voucherNumber %}
-                        <VOUCHERNUMBER>{{ voucher.voucherNumber | escape }}</VOUCHERNUMBER>
-                        {% endif %}
                     </VOUCHER>
                 </TALLYMESSAGE>
                 {% endfor %}

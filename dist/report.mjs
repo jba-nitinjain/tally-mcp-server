@@ -46,10 +46,11 @@ export async function fetchReport(targetReport, inputParams, options) {
             else if (typeof _value == 'string' && input.datatype == 'date' && /^\d\d\d\d-\d\d-\d\d/.test(_value)) //ISO DateTime YYYY-MM-DDTHH:MM:SS
                 lstInputs.set(input.name, utility.Date.parse(_value.substring(0, 10), 'yyyy-MM-dd'));
             else if (typeof _value == 'string' && input.datatype == 'string')
-                // names are accepted raw or escaped; a double quote is doubled because every report
-                // template places the name inside a TDL string literal. XML escaping (& < > " ') is
-                // applied afterwards by the template engine, so an apostrophe travels as &#39;
-                lstInputs.set(input.name, utility.String.normaliseName(_value).replace(/"/g, '""'));
+                // names are accepted raw or escaped and handed to the template as a complete TDL
+                // expression (quotes included): TDL has no escape for a double quote, so one is built
+                // with $$StrByCharCode:34. XML escaping (& < > " ') is applied afterwards by the
+                // template engine, so an apostrophe travels as &#39;
+                lstInputs.set(input.name, utility.String.tdlLiteral(utility.String.normaliseName(_value)));
             else {
                 retval.error = `Parameter ${input.name} not found or contains invalid value [${_value}]`;
                 return retval;

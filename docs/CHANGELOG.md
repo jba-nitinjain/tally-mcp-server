@@ -1,5 +1,44 @@
 # Release History
 
+### Version: v7.9.7 [16/10/2026]
+
+Fixed:
+* **TallyPrime 6.1 stopped with "Cannot understand. Bad formula!" when a name held a double quote (for example the stock item 24"WF Aircirculator).** A quote inside a name was doubled before the name was placed in a Tally formula, which TallyPrime does not accept. The quote is now produced with $$StrByCharCode:34, so such names work in ledger-account, ledger-period-balance, stock-item-account, the ledger and stock item balance tools, the group and stock group filters, list-master search and voucher lookups by number or guid. list-master search no longer drops the quote from the text searched for
+
+### Version: v7.9.6 [01/10/2026]
+
+Fixed:
+* **voucher-delete deleted nothing on Tally.ERP 9 ("Tally did not find this voucher by its import id ... although it was there a moment ago"), and correcting a voucher created a duplicate instead of changing it.** Tally matches an import's REMOTEID only against the id another program stored with a voucher (REMOTEGUID), which is empty for every voucher entered in Tally or created by the connector, never against its guid. v7.9.5 sent the guid there, so every deletion was refused with "Voucher does not exist!" and every correction was saved as a new voucher. A voucher is now found the way Tally does it: by its date, voucher type and voucher number (verified on Tally.ERP 9)
+* Tally renumbers the later vouchers of a type as soon as one is deleted, so every voucher of a call is read again by its master id just before it is sent, with the number it has at that moment; a number read earlier would have deleted the next voucher
+* A voucher whose number another voucher of the same type shares on the same date (an optional voucher takes the number of the regular one beside it), or which has no number, cannot be told apart by Tally and is now refused, to be deleted or changed on the Tally screen; a voucher with no number but an id from another program is handled through that id when no other voucher carries it
+* A correction keeps the voucher number unless a new one is given (Tally.ERP 9 gives a voucher moved to another date the next number of that date when the type is numbered automatically; the number it holds is returned), refuses to change the voucher type, and is read back afterwards (confirmed: Tally holds the voucher with a higher alteration id on the new date). A correction which Tally saves as a new voucher stops the call and names the new voucher
+* Vouchers created in a large batch came back with guid null: the guid is now read back by master id, in milliseconds whatever the voucher's date, instead of through a list of the vouchers of that date
+* The search for a guid on a given date used $$IsEqual, which Tally.ERP 9 does not evaluate on a voucher's guid, so it never found anything there; it now compares with =
+
+### Version: v7.9.5 [01/10/2026]
+
+Fixed:
+* **Deleting a voucher did not work for the user, and could not be made to work without a guid.** voucher-delete demanded a guid (only obtainable through ledger-account), a date in YYYY-MM-DD it did not mention, and a voucher type, and sent the request blind. Its date, voucherType and voucherNumber are now optional cross-checks, a voucher can instead be named by date, voucher type and number together, DD/MM/YYYY is accepted, and every voucher is looked up in Tally before anything is deleted: a guid naming no voucher, a date / type / number differing from what Tally holds, or a number matching several vouchers refuses the whole call with nothing deleted. Vouchers are deleted one at a time, each deletion is checked afterwards, and the answer lists every voucher with its status (deleted, failed, unknown, not_attempted), guid, date, voucher type and number
+* **A voucher imported by another program could not be deleted, and correcting it created a duplicate (TallyPrime 7.0).** Tally matches an import on the remote id stored with the voucher (REMOTEGUID), which for such vouchers differs from the guid ledger-account shows. That id is now read from Tally before a delete or an alteration and used in the request, and a voucher whose id is shared with another voucher is refused
+* The lookups and the deletions share the 45s budget of a call; vouchers that do not fit are reported as not_attempted instead of being lost to a timeout
+* voucher-create-update now keeps to the same 45s budget: its lookups, posts and guid read-backs share it, a voucher is not sent when too little time is left, and a post Tally does not answer in time is reported as possibly saved (check before resending) instead of running past the 60s the Claude relay allows
+* The lookup by master id now understands TallyPrime 7.0's bare <ERRORMSG>Could not find Voucher</ERRORMSG> answer; it was taken for an unexpected reply, which would have refused every voucher whose import id differs from its guid
+
+### Version: v7.9.4 [30/09/2026]
+
+Fixed:
+* **Correcting a voucher timed out on a large company, with nothing changed (v7.9.3).** Before a correction, v7.9.3 looked the voucher up on its date and, if it was not there, across the whole books. A correction which moved a voucher to a new date always missed on the first search, and the second one took longer than the time allowed for a call. The voucher is now fetched directly by the number at the end of its guid, which works in under a second whatever its date. A Voucher collection is searched only on the date supplied, for a guid which does not follow Tally's numbering
+* **TallyPrime 7.0 creates a new voucher when asked to correct a guid it cannot find**, instead of refusing. The guid check before a correction is therefore kept, and a made-up guid is refused before anything reaches Tally. If Tally still reports a created voucher where a correction was asked for, the answer now carries a warning naming the new voucher, so it can be deleted
+
+### Version: v7.9.3 [30/09/2026]
+
+Fixed:
+* **Changing an existing voucher failed with *Voucher does not exist!* (reported on TallyPrime 7.0).** Creating a voucher returned only a count, never the guid Tally gave the new voucher. To change that voucher afterwards the model built a guid itself by counting on from other guids, but Tally does not give out those numbers one voucher at a time, so the guid named no voucher and Tally refused the change. The Tally import log showed every failed attempt pointing at a guid which did not exist in the company
+  * **voucher-create-update** now returns a `vouchers` array with the guid, date, voucher type and voucher number of every voucher it created or altered, read back from Tally, so a voucher can be changed or deleted later without guessing
+  * **voucher-create-update** and **voucher-delete** now confirm every guid against the target company before posting anything. A guid which names no voucher is refused with a message saying where to take a real guid from, instead of Tally's bare *Voucher does not exist!*
+  * Vouchers are now posted one at a time. When one is rejected, the error names it and lists the vouchers already saved before it, so they are not created twice on a retry
+  * Voucher lookups always pass the period to search. Tally only lists the vouchers of the period it is currently on, which the previous request may have left anywhere
+
 ### Version: v7.9.2 [25/09/2026]
 
 Fixed:
