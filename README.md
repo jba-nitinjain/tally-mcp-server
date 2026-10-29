@@ -620,6 +620,7 @@ Every object of `vouchers` supports:
 |reference / referenceDate (optional)|Reference like a purchase order or supplier invoice number and its date|
 |partyLedgerName (optional)|Party ledger of the voucher|
 |narration (optional)|Narration or remarks|
+|isOptional (optional)|`true` saves the voucher as an optional voucher, which does not affect the books; `false` makes an optional voucher regular again. Skip it to keep what Tally holds for an existing voucher (a new voucher then follows its voucher type). Tally may give a voucher made optional a new number, which is returned. Optional vouchers are not shown by `ledger-account`; find them with `optional-vouchers`|
 |objectView (optional)|One of `Accounting Voucher View`, `Invoice Voucher View`, `Inventory Voucher View`. Derived automatically when skipped|
 |ledgerEntries|Accounting entries. Empty array only for a pure inventory voucher like Delivery Note or Stock Journal|
 |inventoryEntries (optional)|Inventory entries for an inventory affecting voucher type. Not used by a Stock Journal|
@@ -647,7 +648,20 @@ Every object of `inventoryEntries` supports:
 |accountingLedger (optional)|Sales / purchase / stock adjustment ledger to which the value is posted. Mandatory for an invoice like Sales or Purchase|
 
 **Output**
-JSON result with the count of `created` and `altered` vouchers, the `company` written to, and a `vouchers` array holding, for every voucher in the order supplied, `action` (`created` or `altered`), `guid`, `date`, `voucherType` and `voucherNumber`; an altered voucher also has `confirmed` (true when Tally was read back and holds the change) and, where relevant, `note` or `warning`. The call is an error when any voucher has a `warning` or is not confirmed. The guid of a created voucher is read back from Tally by its master id, so the voucher can be altered or deleted later. Vouchers are posted one at a time; when one is rejected, the error lists the vouchers saved before it.
+JSON result with the count of `created` and `altered` vouchers, the `company` written to, and a `vouchers` array holding, for every voucher in the order supplied, `action` (`created` or `altered`), `guid`, `date`, `voucherType` and `voucherNumber`, plus `isOptional` when it was asked for or the voucher is optional; an altered voucher also has `confirmed` (true when Tally was read back and holds the change) and, where relevant, `note` or `warning`. The call is an error when any voucher has a `warning` or is not confirmed. The guid of a created voucher is read back from Tally by its master id, so the voucher can be altered or deleted later. Vouchers are posted one at a time; when one is rejected, the error lists the vouchers saved before it.
+
+### optional-vouchers
+List the optional vouchers of a period. `ledger-account` and `stock-item-account` leave them out because they do not affect the books, so this is where the guid of an optional voucher is found, to change it with `voucher-create-update` (sending every entry again, with `isOptional` `false` to make it regular) or to delete it with `voucher-delete`.
+
+**Input**
+|Argument|Description|
+|--|--|
+|targetCompany|Company name, **mandatory** on every call, exactly as listed by `server-info`|
+|fromDate|Start date in YYYY-MM-DD|
+|toDate|End date in YYYY-MM-DD|
+
+**Output**
+JSON with `count`, the `company` read from, and a `vouchers` array holding `guid`, `date`, `voucherType`, `voucherNumber`, `narration`, `partyLedgerName` and `ledgerEntries` (`ledgerName`, `amount`, debit negative and credit positive). Stock lines are not listed: `hasInventoryEntries` `true` marks a voucher which also carries them. At most 100 vouchers are listed per call; `truncated` `true` asks for a shorter period.
 
 ### voucher-delete
 Delete one (or more) vouchers from Tally permanently. This operation cannot be undone.

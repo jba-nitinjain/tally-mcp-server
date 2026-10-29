@@ -3,7 +3,7 @@ import net from 'node:net';
 import nunjucks from 'nunjucks';
 import { XMLParser } from 'fast-xml-parser';
 import { utility } from './utility.mjs';
-import { lstCollectionFields, lstInternalCollectionFields, lstPushXml, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers, xmlVoucherObject, xmlVoucherKeyLookup } from './definition.mjs';
+import { lstCollectionFields, lstInternalCollectionFields, lstPushXml, lstReportXml, xmlInvokeAction, xmlQueryCollection, xmlDeleteMasters, xmlDeleteVouchers, xmlVoucherObject, xmlVoucherDetail, xmlVoucherKeyLookup } from './definition.mjs';
 import { logDebug, logInfo, logWarn } from './log.mjs';
 import { getTallyConnection, isValidPort } from './connection.mjs';
 import { TallyTransportError } from './tallyerror.mjs';
@@ -63,7 +63,7 @@ function getTemplate(xml) {
  * Compiles every known template ahead of the first request
  */
 function precompileTemplates() {
-    let lstXml = [xmlQueryCollection, xmlInvokeAction, xmlDeleteMasters, xmlDeleteVouchers, xmlVoucherObject, xmlVoucherKeyLookup, ...lstReportXml.values(), ...lstPushXml.values()];
+    let lstXml = [xmlQueryCollection, xmlInvokeAction, xmlDeleteMasters, xmlDeleteVouchers, xmlVoucherObject, xmlVoucherDetail, xmlVoucherKeyLookup, ...lstReportXml.values(), ...lstPushXml.values()];
     for (const xml of lstXml)
         getTemplate(xml);
     return lstXml.length;
@@ -305,7 +305,31 @@ function xmlText(value) {
  * of the VOUCHER element are read
  */
 export async function findVoucherByMasterId(masterId, targetCompany, deadline) {
-    const respContent = await sendTallyXml(xmlVoucherObject, new Map([['masterId', masterId], ['targetCompany', targetCompany]]), undefined, undefined, { idempotent: true, label: 'object:voucher', deadline });
+    const objVoucher = await fetchVoucherObject(xmlVoucherObject, masterId, targetCompany, deadline);
+    return objVoucher ? voucherIdentity(objVoucher) : undefined;
+}
+/**
+ * Fetches one voucher by its master id with its narration, party and accounting entries, for the optional-vouchers tool.
+ * Amounts follow the connector's convention (debit negative), which is how Tally exports them
+ */
+export async function findVoucherDetailByMasterId(masterId, targetCompany, deadline) {
+    const objVoucher = await fetchVoucherObject(xmlVoucherDetail, masterId, targetCompany, deadline);
+    if (!objVoucher)
+        return undefined;
+    const asList = (value) => value === undefined || value === null || value === '' ? [] : (Array.isArray(value) ? value : [value]);
+    const lstEntry = asList(objVoucher['ALLLEDGERENTRIES.LIST'])
+        .map((entry) => ({ ledgerName: utility.String.normaliseName(xmlText(entry?.LEDGERNAME)), amount: parseFloat(xmlText(entry?.AMOUNT).trim()) }))
+        .filter((entry) => entry.ledgerName !== '' && !isNaN(entry.amount));
+    return {
+        ...voucherIdentity(objVoucher),
+        narration: utility.String.unescapeHTML(xmlText(objVoucher.NARRATION).trim()),
+        partyLedgerName: utility.String.normaliseName(xmlText(objVoucher.PARTYLEDGERNAME)),
+        ledgerEntries: lstEntry,
+        hasInventoryEntries: asList(objVoucher['ALLINVENTORYENTRIES.LIST']).some((entry) => xmlText(entry?.STOCKITEMNAME).trim() !== '')
+    };
+}
+async function fetchVoucherObject(xml, masterId, targetCompany, deadline) {
+    const respContent = await sendTallyXml(xml, new Map([['masterId', masterId], ['targetCompany', targetCompany]]), undefined, undefined, { idempotent: true, label: 'object:voucher', deadline });
     const xmlParser = new XMLParser({ parseTagValue: false, htmlEntities: true, ignoreAttributes: true });
     const objParsed = xmlParser.parse(respContent);
     const objData = objParsed?.ENVELOPE?.BODY?.DATA;
@@ -326,9 +350,14 @@ export async function findVoucherByMasterId(masterId, targetCompany, deadline) {
         objVoucher = objVoucher[0];
     if (!objVoucher || typeof objVoucher !== 'object')
         throw new Error(`Tally answered the voucher lookup with something unexpected: ${respContent.slice(0, 200)}`);
-    const guid = utility.String.normaliseName(xmlText(objVoucher.GUID));
-    if (guid === '')
+    if (utility.String.normaliseName(xmlText(objVoucher.GUID)) === '')
         return undefined;
+    return objVoucher;
+}
+/** identity of a voucher from the direct children of its VOUCHER element in an Object export */
+function voucherIdentity(objVoucher) {
+    const guid = utility.String.normaliseName(xmlText(objVoucher.GUID));
+    const optional = xmlText(objVoucher.ISOPTIONAL).trim().toLowerCase();
     const remoteGuid = utility.String.unescapeHTML(xmlText(objVoucher.REMOTEGUID).trim()); //the stored id is compared byte for byte, so it is decoded but never normalised
     const alterId = parseInt(xmlText(objVoucher.ALTERID).trim());
     return {
@@ -339,7 +368,8 @@ export async function findVoucherByMasterId(masterId, targetCompany, deadline) {
         masterId: parseInt(xmlText(objVoucher.MASTERID)),
         date: utility.Date.parse(xmlText(objVoucher.DATE).trim(), 'yyyyMMdd'),
         voucherType: utility.String.normaliseName(xmlText(objVoucher.VOUCHERTYPENAME)),
-        voucherNumber: utility.String.normaliseName(xmlText(objVoucher.VOUCHERNUMBER))
+        voucherNumber: utility.String.normaliseName(xmlText(objVoucher.VOUCHERNUMBER)),
+        isOptional: optional === 'yes' ? true : optional === 'no' ? false : undefined
     };
 }
 /**

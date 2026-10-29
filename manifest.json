@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "tally-mcp-server",
   "display_name": "Tally Prime",
-  "version": "7.9.7",
+  "version": "7.10.0",
   "description": "Expose Tally Prime ERP data to MCP-compatible clients like Claude Desktop.",
   "author": {
     "name": "Dhananjay Gokhale",
@@ -174,6 +174,10 @@
     {
       "name": "voucher-create-update",
       "description": "creates accounting and / or inventory vouchers (transactions like payment, receipt, contra, journal, sales, purchase, debit note, credit note, delivery note, receipt note, stock journal) in Tally Prime, or updates an existing voucher when its guid is supplied. amount convention is debit is negative and credit is positive, and the sum of all amounts of a voucher must be zero. quantity is always an absolute positive number, since inward or outward movement is derived by Tally from the voucher type. when guid is supplied the voucher is fully replaced by the supplied content, so send every entry of that voucher and not just the changed one. guid of an existing voucher can be picked from the output of ledger-account tool, or from the vouchers array this tool returned when the voucher was created; a guid must never be built or guessed from other guids, and a guid naming no voucher of targetCompany is refused before anything is posted. Tally finds the voucher to change by its current date, voucher type and number, read from Tally just before it is posted: it keeps its number unless voucherNumber is given (when the date changes on a voucher type numbered automatically, Tally gives it the next number of the new date, and the number it holds is returned), its voucher type cannot be changed, a voucher whose number another voucher of its type shares on that date, or which has no number, is refused (change it on the Tally screen), and every change is read back afterwards. returns count of created and / or altered records and a vouchers array with, for every voucher in the order supplied, action (created or altered), guid, date, voucherType and voucherNumber, and for an altered voucher confirmed (true when Tally was read back and holds the change). vouchers are posted one at a time, so when one is rejected the error lists the vouchers saved before it, which must not be resent without their guid. targetCompany is mandatory on every call, naming one of the companies open in Tally exactly as listed by server-info; a call without it or naming a company not open is refused, the write is applied to that company only and the response echoes it in a company property"
+    },
+    {
+      "name": "optional-vouchers",
+      "description": "lists the optional vouchers of a period, which ledger-account leaves out, with their guid, date, voucher type, number, narration, party and accounting entries, so that one can be changed with voucher-create-update or deleted with voucher-delete. targetCompany is mandatory on every call"
     },
     {
       "name": "voucher-delete",

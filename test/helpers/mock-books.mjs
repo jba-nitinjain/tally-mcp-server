@@ -18,7 +18,7 @@ const unescapeXml = (text) => text.replace(/&quot;/g, '"').replace(/&apos;/g, "'
 const ok = (created, altered, deleted, lastVchId) => `<RESPONSE><CREATED>${created}</CREATED><ALTERED>${altered}</ALTERED><DELETED>${deleted}</DELETED><LASTVCHID>${lastVchId}</LASTVCHID><LASTMID>0</LASTMID><COMBINED>0</COMBINED><IGNORED>0</IGNORED><ERRORS>0</ERRORS><CANCELLED>0</CANCELLED><EXCEPTIONS>0</EXCEPTIONS></RESPONSE>`;
 const lineError = (text) => `<RESPONSE><LINEERROR>${text}</LINEERROR><CREATED>0</CREATED><ALTERED>0</ALTERED><DELETED>0</DELETED><LASTVCHID>0</LASTVCHID><LASTMID>0</LASTMID><COMBINED>0</COMBINED><IGNORED>0</IGNORED><ERRORS>1</ERRORS><CANCELLED>0</CANCELLED><EXCEPTIONS>0</EXCEPTIONS></RESPONSE>`;
 // the Object export of a voucher, in the live shape: the whole voucher, with nested DATE tags inside its lists
-const objectXml = (v) => `<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER><BODY><DESC></DESC><DATA><TALLYMESSAGE><VOUCHER ID="${v.masterId}" REQNAME="ID:${v.masterId}" VCHTYPE="${v.type}" OBJVIEW="Accounting Voucher View"><BANKERSDATE.LIST TYPE="Date"><BANKERSDATE/></BANKERSDATE.LIST><DATE>${v.date.replace(/-/g, '')}</DATE><GUID>${v.guid}</GUID>${v.remoteGuid ? `<REMOTEGUID>${v.remoteGuid}</REMOTEGUID>` : '<REMOTEGUID/>'}<VOUCHERTYPENAME>${v.type}</VOUCHERTYPENAME><VOUCHERNUMBER>${v.number}</VOUCHERNUMBER><MASTERID> ${v.masterId}</MASTERID><ALTERID> ${v.alterId}</ALTERID><NARRATION>${v.narration}</NARRATION><ALLLEDGERENTRIES.LIST><BANKALLOCATIONS.LIST><DATE>20250501</DATE></BANKALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST></VOUCHER></TALLYMESSAGE></DATA></BODY></ENVELOPE>`;
+const objectXml = (v) => `<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER><BODY><DESC></DESC><DATA><TALLYMESSAGE><VOUCHER ID="${v.masterId}" REQNAME="ID:${v.masterId}" VCHTYPE="${v.type}" OBJVIEW="Accounting Voucher View"><BANKERSDATE.LIST TYPE="Date"><BANKERSDATE/></BANKERSDATE.LIST><DATE>${v.date.replace(/-/g, '')}</DATE><GUID>${v.guid}</GUID>${v.remoteGuid ? `<REMOTEGUID>${v.remoteGuid}</REMOTEGUID>` : '<REMOTEGUID/>'}<VOUCHERTYPENAME>${v.type}</VOUCHERTYPENAME><VOUCHERNUMBER>${v.number}</VOUCHERNUMBER><MASTERID> ${v.masterId}</MASTERID><ALTERID> ${v.alterId}</ALTERID><NARRATION>${v.narration}</NARRATION><ISOPTIONAL>${v.optional ? 'Yes' : 'No'}</ISOPTIONAL>${(v.entries || []).map((e) => `<ALLLEDGERENTRIES.LIST><NARRATION/><LEDGERNAME>${e.ledgerName}</LEDGERNAME><AMOUNT>${e.amount.toFixed(2)}</AMOUNT></ALLLEDGERENTRIES.LIST>`).join('') || '<ALLLEDGERENTRIES.LIST><BANKALLOCATIONS.LIST><DATE>20250501</DATE></BANKALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST>'}</VOUCHER></TALLYMESSAGE></DATA></BODY></ENVELOPE>`;
 // TallyPrime answers an unknown id with a bare ERRORMSG, outside any ENVELOPE (seen live)
 const notFound = (id) => `<ERRORMSG>Could not find Voucher:${id}!</ERRORMSG>\r\n`;
 const keyRow = (v) => `<ROW><GUID>${v.guid}</GUID><REMOTEGUID>${v.remoteGuid}</REMOTEGUID><MASTERID>${v.masterId}</MASTERID><DATE>${v.date}</DATE><VOUCHERTYPENAME>${v.type}</VOUCHERTYPENAME><VOUCHERNUMBER>${v.number}</VOUCHERNUMBER><ALTERID>${v.alterId}</ALTERID></ROW>`;
@@ -46,6 +46,13 @@ export function createMockBooks({ companies = ['Demo Co'], ledgers = ['Cash', 'O
         resetOptions();
     }
 
+    // the ISOPTIONAL of an import body: true, false, or undefined when it is not sent
+    const optionalOf = (body) => {
+        const flag = /<ISOPTIONAL>([^<]*)/.exec(body)?.[1];
+        return flag === undefined ? undefined : flag.trim().toLowerCase() === 'yes';
+    };
+    const entriesOf = (body) => [...body.matchAll(/<ALLLEDGERENTRIES\.LIST>\s*<LEDGERNAME>([^<]*)<\/LEDGERNAME>[\s\S]*?<AMOUNT>([^<]*)<\/AMOUNT>/g)].map((m) => ({ ledgerName: unescapeXml(m[1]), amount: parseFloat(m[2]) }));
+
     const nextNumber = (type) => String(Math.max(0, ...[...state.books.values()].filter((v) => v.type === type && /^\d+$/.test(v.number)).map((v) => parseInt(v.number))) + 1);
 
     function createVoucher(attrs, body, remoteGuid) {
@@ -55,7 +62,8 @@ export function createMockBooks({ companies = ['Demo Co'], ledgers = ['Cash', 'O
         const date = /<DATE>(\d{8})<\/DATE>/.exec(body)?.[1] || '20250101';
         state.books.set(masterId, {
             masterId, guid: guidOf(masterId), remoteGuid, type, number: bodyNumber ? unescapeXml(bodyNumber) : nextNumber(type),
-            date: `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`, alterId: ++state.alterSeq, narration: unescapeXml(/<NARRATION>([^<]*)/.exec(body)?.[1] || ''), optional: false
+            date: `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`, alterId: ++state.alterSeq, narration: unescapeXml(/<NARRATION>([^<]*)/.exec(body)?.[1] || ''),
+            optional: optionalOf(body) ?? false, entries: entriesOf(body)
         });
         return masterId;
     }
@@ -107,6 +115,13 @@ export function createMockBooks({ companies = ['Demo Co'], ledgers = ['Cash', 'O
             if (date) voucher.date = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`;
             voucher.number = unescapeXml(/<VOUCHERNUMBER>([^<]*)/.exec(rest)?.[1] || ''); // an Alter without a number blanks it
             voucher.narration = unescapeXml(/<NARRATION>([^<]*)/.exec(rest)?.[1] || '');
+            voucher.entries = entriesOf(rest);
+            // seen live on TallyPrime: a voucher made optional takes the next number of its type; one made regular keeps its number
+            const optional = optionalOf(rest);
+            if (optional === true && !voucher.optional)
+                voucher.number = nextNumber(voucher.type);
+            if (optional !== undefined)
+                voucher.optional = optional;
             voucher.alterId = ++state.alterSeq;
             return reply(res, ok(0, 1, 0, 0));
         }
@@ -125,6 +140,7 @@ export function createMockBooks({ companies = ['Demo Co'], ledgers = ['Cash', 'O
         let m;
         if (filter.includes('$$IsEqual')) lstRow = []; // Tally.ERP 9 evaluates these to nothing
         else if ((m = /^\$VoucherNumber = "(.*)"$/.exec(filter))) lstRow = lstInPeriod.filter((v) => lower(v.number) === lower(m[1]));
+        else if (filter === '$IsOptional') lstRow = lstInPeriod.filter((v) => v.optional);
         else if ((m = /^\$RemoteGUID = "(.*)"$/.exec(filter))) lstRow = lstInPeriod.filter((v) => v.remoteGuid !== '' && lower(v.remoteGuid) === lower(m[1]));
         else if ((m = /^\$Guid = "(.*)" OR \$RemoteGUID = "(.*)"$/.exec(filter))) lstRow = lstInPeriod.filter((v) => lower(v.guid) === lower(m[1]) || (v.remoteGuid !== '' && lower(v.remoteGuid) === lower(m[2])));
         else state.unknownFilters.push(filter);

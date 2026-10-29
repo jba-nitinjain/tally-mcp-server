@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import { deleteMasters, deleteVouchers, findVoucherByMasterId, findVouchersByKey, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, scanTallyInstances, setTallyConnection, tallyTimeoutMs } from './tally.mjs';
+import { deleteMasters, deleteVouchers, findVoucherByMasterId, findVoucherDetailByMasterId, findVouchersByKey, getTallyConnection, importMasters, importVouchers, invokeTallyAction, probeTallyInstance, queryCollection, renameObjectArrayProperties, scanTallyInstances, setTallyConnection, tallyTimeoutMs } from './tally.mjs';
 import { fetchReport } from './report.mjs';
 import { fetchLedgerAccount } from './ledgeraccount.mjs';
 import { resolveBsPl } from './ledgernature.mjs';
@@ -456,6 +456,19 @@ async function chooseImportTarget(voucher, company, deadline, verb) {
  * its guid and can alter or delete it later without guessing. An Object export answers in milliseconds wherever the
  * voucher is dated; the generic voucher collection needs Tally to switch period, which took seconds per voucher
  */
+/** the optional vouchers listed by one call of optional-vouchers; each is read from Tally on its own */
+const maxOptionalVouchers = 100;
+/**
+ * The isOptional a voucher reports back: shown whenever it was asked for or Tally holds the voucher optional, with a warning
+ * when Tally holds the opposite of what was asked (an optional voucher counts nowhere in the books, so a silent miss matters)
+ */
+function optionalOutcome(asked, held) {
+    if (asked !== undefined && held !== undefined && asked !== held)
+        return { isOptional: held, warning: `Tally holds this voucher as ${held ? 'optional' : 'regular'}, although ${asked ? 'optional' : 'regular'} was asked for` };
+    if (held === true || asked !== undefined)
+        return { isOptional: held ?? asked };
+    return {};
+}
 async function readBackCreated(masterId, company, callDeadline) {
     if (!masterId || callDeadline - Date.now() < 1000)
         return undefined;
@@ -1732,7 +1745,7 @@ export async function registerMcpServer() {
             inputSchema: {
                 targetCompany: targetCompanySchema,
                 vouchers: z.array(z.object({
-                    guid: z.string().optional().describe('optional guid of an existing voucher to update it, obtained from ledger-account tool or from the vouchers array returned when it was created. never build or guess it. skip it to create a new voucher'),
+                    guid: z.string().optional().describe('optional guid of an existing voucher to update it, obtained from ledger-account tool (optional-vouchers for an optional voucher) or from the vouchers array returned when it was created. never build or guess it. skip it to create a new voucher'),
                     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('voucher date in YYYY-MM-DD, must fall within the financial year of the company'),
                     voucherType: z.string().describe('voucher type name like Payment, Receipt, Contra, Journal, Sales, Purchase, Credit Note, Debit Note, Delivery Note, Receipt Note, validate it using list-master tool with collection as vouchertype'),
                     voucherNumber: z.string().optional().describe('optional voucher number, skip it to let Tally auto-number the voucher as per the numbering method of the voucher type'),
@@ -1740,6 +1753,7 @@ export async function registerMcpServer() {
                     referenceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('optional date of the reference'),
                     partyLedgerName: z.string().optional().describe('optional party ledger name of the voucher, validate it using list-master tool with collection as ledger'),
                     narration: z.string().optional().describe('optional narration or remarks of the voucher'),
+                    isOptional: z.boolean().optional().describe('optional, true to save the voucher as an optional voucher, which does not affect the books, and false to make an optional voucher regular again. skip it to keep what Tally holds for an existing voucher, and to save a new voucher as its voucher type decides. Tally may give a voucher made optional a new number, which is returned. an optional voucher is not shown by ledger-account; find it with the optional-vouchers tool'),
                     objectView: z.enum(lstVoucherView).optional().describe('optional voucher view. skipping it picks Invoice Voucher View when both ledger and inventory entries are present, Inventory Voucher View when only inventory entries are present and Accounting Voucher View otherwise'),
                     ledgerEntries: z.array(z.object({
                         ledgerName: z.string().describe('ledger name of the entry, validate it using list-master tool with collection as ledger'),
@@ -1869,6 +1883,7 @@ export async function registerMcpServer() {
                         partyLedgerName: voucher.partyLedgerName ? lstLedgerName.get(voucher.partyLedgerName) : undefined,
                         narration: voucher.narration,
                         isInvoice: objectView === 'Invoice Voucher View',
+                        isOptional: voucher.isOptional,
                         objectView,
                         ledgerEntries: lstLedgerEntry,
                         inventoryEntries: lstInventoryEntry,
@@ -1940,7 +1955,7 @@ export async function registerMcpServer() {
                         result.altered += status.altered || 0;
                         const created = await readBackCreated(status.lastVoucherId, company, callDeadline);
                         result.vouchers.push(created
-                            ? { action: 'created', guid: created.guid, date: args.vouchers[i].date, voucherType: created.voucherType, voucherNumber: created.voucherNumber }
+                            ? { action: 'created', guid: created.guid, date: args.vouchers[i].date, voucherType: created.voucherType, voucherNumber: created.voucherNumber, ...optionalOutcome(objVoucher.isOptional, created.isOptional) }
                             : { action: 'created', guid: null, date: args.vouchers[i].date, voucherType: objVoucher.voucherType, note: 'the guid could not be read back; take it from ledger-account before altering this voucher' });
                         continue;
                     }
@@ -1964,6 +1979,7 @@ export async function registerMcpServer() {
                     objVoucher.target = check.target;
                     objVoucher.voucherType = fresh.voucherType;
                     objVoucher.voucherNumber = args.vouchers[i].voucherNumber?.trim() || fresh.voucherNumber || undefined; //always sent: an Alter without a number may blank it
+                    objVoucher.isOptional = args.vouchers[i].isOptional ?? fresh.isOptional; //the full replacement must not turn an optional voucher regular, or the reverse, unasked
                     try {
                         status = await importVouchers([objVoucher], company, callDeadline);
                     }
@@ -2015,9 +2031,13 @@ export async function registerMcpServer() {
                             confirmed = null; //Tally could not be asked in time
                         }
                     }
+                    const optional = optionalOutcome(args.vouchers[i].isOptional, after?.isOptional);
+                    if (optional.warning)
+                        lstWarning.push(optional.warning);
                     result.vouchers.push({
                         action: 'altered', guid: resolved.guid, date: args.vouchers[i].date, voucherType: fresh.voucherType,
                         voucherNumber: after?.voucherNumber ?? objVoucher.voucherNumber, confirmed,
+                        ...(optional.isOptional !== undefined ? { isOptional: optional.isOptional } : {}),
                         ...(note ? { note } : {}), ...(lstWarning.length > 0 ? { warning: lstWarning.join('; ') } : {})
                     });
                 }
@@ -2031,6 +2051,57 @@ export async function registerMcpServer() {
                 return {
                     isError: true,
                     content: [{ type: 'text', text: formatError(err) }]
+                };
+            }
+        });
+        mcpServer.registerTool('optional-vouchers', {
+            title: 'Optional Vouchers',
+            description: `lists the optional vouchers of a period, which ledger-account and stock-item-account leave out because they do not affect the books. each comes with its guid, date, voucherType, voucherNumber, narration, partyLedgerName and accounting entries (debit is negative and credit is positive). use the guid to change one with voucher-create-update, sending every entry again (set isOptional false to make it regular), or to delete one with voucher-delete. stock lines are not listed: hasInventoryEntries true means the voucher also carries stock lines, which must be read in Tally before it is changed. at most ${maxOptionalVouchers} vouchers are listed per call; when truncated is true, ask again for a shorter period. targetCompany is MANDATORY on every call, naming one of the companies open in Tally exactly as listed by server-info`,
+            inputSchema: {
+                targetCompany: targetCompanySchema,
+                fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('from or start date'),
+                toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('to or end date')
+            },
+            annotations: {
+                readOnlyHint: true,
+                openWorldHint: false
+            }
+        }, async (args) => {
+            const start = Date.now();
+            try {
+                const company = await resolveTargetCompany(args.targetCompany);
+                const fromDate = parseInputDate(args.fromDate);
+                const toDate = parseInputDate(args.toDate);
+                if (fromDate.getTime() > toDate.getTime())
+                    throw new Error(`fromDate ${args.fromDate} is after toDate ${args.toDate}`);
+                // the lookup and the reads share the budget of a call, so a long list is cut short rather than timed out
+                const callDeadline = start + tallyTimeoutMs;
+                const lstFound = (await findVouchersByKey('$IsOptional', company, fromDate, callDeadline, toDate))
+                    .sort((a, b) => a.date.getTime() - b.date.getTime() || a.masterId - b.masterId);
+                const vouchers = [];
+                let truncated = lstFound.length > maxOptionalVouchers;
+                for (const found of lstFound.slice(0, maxOptionalVouchers)) {
+                    if (callDeadline - Date.now() < 1000) {
+                        truncated = true;
+                        break;
+                    }
+                    const detail = await findVoucherDetailByMasterId(found.masterId, company, callDeadline);
+                    if (!detail || detail.isOptional === false)
+                        continue; //deleted or made regular since the lookup
+                    vouchers.push({
+                        guid: detail.guid, date: isoDate(detail.date), voucherType: detail.voucherType, voucherNumber: detail.voucherNumber,
+                        narration: detail.narration, partyLedgerName: detail.partyLedgerName, ledgerEntries: detail.ledgerEntries,
+                        ...(detail.hasInventoryEntries ? { hasInventoryEntries: true } : {})
+                    });
+                }
+                return {
+                    content: [{ type: 'text', text: JSON.stringify({ count: vouchers.length, ...(truncated ? { truncated: true, found: lstFound.length } : {}), vouchers, company }) }]
+                };
+            }
+            catch (err) {
+                return {
+                    isError: true,
+                    content: [{ type: 'text', text: formatError(err, periodOf(args)) }]
                 };
             }
         });

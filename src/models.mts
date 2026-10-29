@@ -82,6 +82,8 @@ export interface TallyVoucherIdentity {
     voucherNumber: string;
     /** ALTERID, raised by Tally on every change of the voucher */
     alterId?: number;
+    /** ISOPTIONAL: an optional voucher does not affect the books; undefined when Tally did not say */
+    isOptional?: boolean;
 }
 
 /** how an import tells Tally which existing voucher to alter or delete: by date, type and number (works for every voucher), or by the id another program stored with it */
@@ -117,7 +119,18 @@ export interface TallyVoucher {
     partyLedgerName?: string;
     narration?: string;
     isInvoice?: boolean;
+    /** sent as ISOPTIONAL when set; left out, Tally keeps what it holds */
+    isOptional?: boolean;
     objectView: string;
     ledgerEntries: TallyVoucherLedgerEntry[];
     inventoryEntries?: TallyVoucherInventoryEntry[];
+}
+
+/** an optional voucher as listed by the optional-vouchers tool, with its accounting entries */
+export interface TallyOptionalVoucher extends TallyVoucherIdentity {
+    narration: string;
+    partyLedgerName: string;
+    ledgerEntries: { ledgerName: string; amount: number }[];
+    /** true when the voucher also carries stock lines, which are not listed */
+    hasInventoryEntries: boolean;
 }

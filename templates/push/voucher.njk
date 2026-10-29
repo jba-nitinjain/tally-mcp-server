@@ -49,6 +49,9 @@
                         {% if voucher.voucherNumber %}
                         <VOUCHERNUMBER>{{ voucher.voucherNumber | escape }}</VOUCHERNUMBER>
                         {% endif %}
+                        {% if voucher.isOptional != undefined %}
+                        <ISOPTIONAL>{{ "Yes" if voucher.isOptional else "No" }}</ISOPTIONAL>
+                        {% endif %}
                         {% if voucher.reference %}
                         <REFERENCE>{{ voucher.reference | escape }}</REFERENCE>
                         {% endif %}

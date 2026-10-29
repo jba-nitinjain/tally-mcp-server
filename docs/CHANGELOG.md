@@ -1,5 +1,12 @@
 # Release History
 
+### Version: v7.10.0 [29/10/2026]
+
+Added:
+* **A voucher can be marked optional, or made regular again.** voucher-create-update takes `isOptional`: `true` saves a new or existing voucher as optional (it does not affect the books), `false` turns an optional voucher back into a regular one. An existing voucher is changed in place and keeps its guid. Tally gives a voucher made optional the next number of its type, and the number it holds afterwards is returned with a note. A voucher made regular keeps its number. Verified live on TallyPrime against GAUTAM HIRE PURCHASE LTD (port 9040)
+* Changing a voucher without `isOptional` keeps it optional or regular as Tally holds it, since the change replaces the whole voucher. The answer shows `isOptional` whenever it was asked for or the voucher is optional, and warns when Tally holds the opposite of what was asked
+* **optional-vouchers**, a new tool, lists the optional vouchers of a period with their guid, number, narration, party and accounting entries. ledger-account leaves optional vouchers out, so without it an optional voucher could not be found again to change or delete it
+
 ### Version: v7.9.7 [16/10/2026]
 
 Fixed:
